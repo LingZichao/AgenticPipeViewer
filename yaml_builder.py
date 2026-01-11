@@ -12,12 +12,12 @@ from utils import resolve_signal_path
 class Task:
     """Task configuration data structure"""
 
+    id: str
     capture: List[str]
     raw_condition: str
     has_dep_in_condition: bool
     has_pattern_in_capture: bool
 
-    id: Optional[str] = None
     name: Optional[str] = None
     scope: Optional[str] = None
     deps: List[str] = field(default_factory=list)
@@ -43,12 +43,16 @@ class Task:
         has_dep = "$dep." in raw_condition
         has_pattern = any("{" in str(sig) and "}" in str(sig) for sig in raw_capture)
 
+        task_id = data.get("id")
+        if not task_id or not isinstance(task_id, str):
+            raise ValueError("[ERROR] Task 'id' field is required and must be a string")
+
         return cls(
+            id=task_id,
             raw_condition=raw_condition,
             capture=capture,
             has_dep_in_condition=has_dep,
             has_pattern_in_capture=has_pattern,
-            id=data.get("id"),
             name=data.get("name"),
             scope=task_scope,
             deps=data.get("dependsOn", []),
@@ -266,24 +270,30 @@ class YamlBuilder:
     def _validate_task(self, task: dict[str, Any], task_num: int) -> None:
         """Validate task configuration"""
         line_info = self._get_line_info(f"tasks[{task_num - 1}]")
-        task_identifier = task.get("id") or task.get("name") or f"Task {task_num}"
 
         def require_nonempty(value: Any, field_name: str) -> None:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' '{field_name}' must be non-empty string{line_info}"
+                    f"[ERROR] Task {task_num} '{field_name}' must be non-empty string{line_info}"
                 )
+
+        # id is required
+        if "id" not in task:
+            raise ValueError(
+                f"[ERROR] Task {task_num} missing required field 'id'{line_info}"
+            )
+
+        task_id = task["id"]
+        require_nonempty(task_id, "id")
+        if not task_id.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(
+                f"[ERROR] Task '{task_id}' id contains invalid characters{line_info}"
+            )
+
+        task_identifier = task_id
 
         if "name" in task:
             require_nonempty(task["name"], "name")
-
-        if "id" in task:
-            task_id = task["id"]
-            require_nonempty(task_id, "id")
-            if not task_id.replace("_", "").replace("-", "").isalnum():
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' id '{task_id}' contains invalid characters{line_info}"
-                )
 
         if "scope" in task:
             require_nonempty(task["scope"], "scope")

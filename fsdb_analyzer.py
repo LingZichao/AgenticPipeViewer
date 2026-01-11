@@ -209,7 +209,7 @@ class FsdbAnalyzer:
 
         return matched_rows
 
-    def _capture_task(self, task: Task, task_id: str) -> str:
+    def _capture_task(self, task: Task) -> str:
         """Execute capture mode task"""
         # Detect trace mode using pre-analyzed flag
         if task.deps:
@@ -220,7 +220,7 @@ class FsdbAnalyzer:
             matched_rows = self._trace_trigger(task)
 
         # Store to memory
-        self.runtime_data[task_id] = {
+        self.runtime_data[task.id] = {
             "rows": matched_rows,
             "capd": task.capture,  # All captured signals are available for reference
         }
@@ -260,7 +260,6 @@ class FsdbAnalyzer:
         results = []
         for exec_idx, task_idx in enumerate(task_order, 1):
             task = tasks[task_idx]
-            task_id = task.id or f"task_{task_idx}"
             # Use name for display, fallback to id
             task_name = task.name or task.id or f"Task {exec_idx}"
 
@@ -270,7 +269,7 @@ class FsdbAnalyzer:
             print(f"{'-' * 70}")
 
             try:
-                result = self._capture_task(task, task_id)
+                result = self._capture_task(task)
                 results.append((task_name, result))
             except Exception as e:
                 print(f"Task failed: {e}")
