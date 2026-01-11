@@ -22,7 +22,7 @@ class FsdbBuilder:
             return signal
         return '/' + signal.replace('.', '/')
 
-    def get_all_signals(self) -> List[str]:
+    def get_signals_index(self) -> List[str]:
         """Get all signals from FSDB using fsdbdebug"""
         if self.all_signals_list:
             return self.all_signals_list
@@ -59,13 +59,13 @@ class FsdbBuilder:
         self.all_signals_list = signals
         return signals
 
-    def dump_signal(self, signal: str) -> List[str]:
+    def get_signal(self, signal: str) -> List[str]:
         """Get cached signal values"""
         if signal in self.signal_cache:
             return self.signal_cache[signal]
-        raise RuntimeError(f"Signal {signal} not found in cache. Call dump_all_signals first.")
+        raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")
 
-    def dump_all_signals(self, signals: List[str]) -> None:
+    def dump_signals(self, signals: List[str]) -> None:
         """Dump all signals at once using single fsdbreport call"""
         if not signals:
             return

@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Union, Any, List, Optional
 from dataclasses import dataclass, field
+from utils import resolve_signal_path
 
 
 @dataclass
@@ -79,7 +80,6 @@ class YamlBuilder:
         self.line_map: dict[str, int] = {}
         self.config: Optional[dict[str, Any]] = None
         self.output_dir: Optional[Path] = None
-        self.available_signals: List[str] = []
         self._tasks_resolved: bool = False
 
     def load_config(self, config_path: str) -> dict[str, Any]:
@@ -151,11 +151,10 @@ class YamlBuilder:
         self._validate_dependencies(config["tasks"])
         self.config = config
 
-    def resolve_signals(
-        self, available_signals: List[str], config: dict[str, Any]
+    def resolve_config(
+        self, config: dict[str, Any]
     ) -> dict[str, Any]:
-        """Resolve signal references and validate against available signals"""
-        self.available_signals = available_signals
+        """Resolve config by converting dict tasks to Task objects"""
         self.config = config
 
         # Convert dict tasks to Task objects
@@ -214,24 +213,8 @@ class YamlBuilder:
     def _resolve_signal_path(
         self, signal: str, task_scope: str, global_scope: str
     ) -> str:
-        """Resolve signal path with scope support"""
-        if not isinstance(signal, str):
-            return signal
-
-        scope = task_scope if task_scope else global_scope
-
-        if signal.startswith("$mod."):
-            if not scope:
-                raise ValueError(f"[ERROR] $mod used but no scope defined: {signal}")
-            signal = signal.replace("$mod.", scope + ".", 1)
-        elif signal == "$mod":
-            if not scope:
-                raise ValueError("[ERROR] $mod used but no scope defined")
-            return scope
-        elif scope and not signal.startswith("tb.") and not signal.startswith("/"):
-            signal = scope + "." + signal
-
-        return signal
+        """Resolve signal path with scope support (delegates to utils)"""
+        return resolve_signal_path(signal, task_scope, global_scope)
 
     def _normalize_condition(self, condition: Union[str, list[str]]) -> str:
         """Normalize condition to single Python expression string"""
@@ -549,7 +532,7 @@ class YamlBuilder:
         context: dict[str, Any] = {"__time__": row_idx}
         for sig in capture_signals:
             sig_name = sig.split(".")[-1].split("/")[-1]
-            val_str = row_data["signals"].get(sig, "0")
+            val_str = row_data["capd"].get(sig, "0")
             if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
                 context[sig_name] = "0x0"
             else:
