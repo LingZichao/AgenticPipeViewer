@@ -1,0 +1,201 @@
+# FSDB Analyzer - Event Dependency Example
+# 演示如何使用事件依赖功能进行流水线分析
+
+fsdb_file: /home/c910/lingzichao/openc910/smart_run/work_force/novas.fsdb
+clock_signal: tb.clk
+# 全局scope（可选）- 简化信号路径书写
+scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.x_ct_ifu_top
+
+output:
+  directory: ifu_reports
+  verbose: false
+
+tasks:
+  # ============================================
+  # 独立任务示例：统计基本事件
+  # ============================================
+  - name: "Count IFU Valid Cycles"
+    mode: count
+    condition:
+      # 使用全局scope: tb.cpu，所以 ifu.valid -> tb.cpu.ifu.valid
+      - [ifu.valid, ==, 1]
+  
+  # ============================================
+  # 任务级scope覆盖全局scope
+  # ============================================
+  - name: "Count Top Level Clock"
+    mode: count
+    scope: tb  # 覆盖全局scope
+    condition:
+      - [clk, ==, 1]  # tb.clk
+  
+  # ============================================
+  # $mod显式引用当前scope
+  # ============================================
+  - name: "IFU Fetch with $mod"
+    mode: count
+    scope: tb.cpu.ifu
+    condition:
+      $and:
+        - [$mod.fetch_valid, ==, 1]  # $mod -> tb.cpu.ifu
+        - [$mod.fetch_ready, ==, 1]
+  
+  # ============================================
+  # 上游任务：捕获分支预测数据
+  # ============================================
+  - id: bp_predict
+    name: "Capture Branch Predictions"
+    mode: capture
+    scope: tb.cpu.ifu  # 任务级scope
+    condition:
+      - [bp_valid, ==, 1]  # 相对路径 -> tb.cpu.ifu.bp_valid
+    capture:
+      - bp_target      # tb.cpu.ifu.bp_target
+      - bp_taken
+      - pc
+      - inst
+    export:
+      # 导出变量供下游任务使用
+      pred_target: bp_target  # 会被解析为完整路径
+      pred_taken: bp_taken
+      pred_pc: pc
+    output:
+      format: hex
+      file: branch_predictions.csv
+  
+  # ============================================
+  # 下游任务1：使用$dep引用检测分支预测错误
+  # ============================================
+  - id: bp_mispredict
+    name: "Count Branch Mispredictions"
+    mode: count
+    depends: bp_predict    # 声明依赖
+    scope: tb.cpu.exu      # EXU模块的scope
+    condition:
+      $and:
+        - [branch_commit, ==, 1]  # tb.cpu.exu.branch_commit
+        # 使用 $dep.task_id.var_name 引用上游数据
+        - [$dep.bp_predict.pred_target, !=, actual_target]  # actual_target -> tb.cpu.exu.actual_target
+  
+  # ============================================
+  # 下游任务2：捕获预测错误的详细信息
+  # ============================================
+  - id: bp_mispredict_detail
+    name: "Capture Misprediction Details"
+    mode: capture
+    depends: bp_predict
+    scope: tb.cpu.exu
+    condition:
+      $and:
+        - [branch_commit, ==, 1]
+        - [$dep.bp_predict.pred_target, !=, actual_target]
+    capture:
+      - $dep.bp_predict.pred_pc       # 可以在capture中使用$dep
+      - $dep.bp_predict.pred_target
+      - actual_target  # tb.cpu.exu.actual_target
+      - inst
+    output:
+      format: hex
+      file: mispredictions_detail.csv
+  
+  # ============================================
+  # 多重依赖示例：分析预测准确率
+  # ============================================
+  - name: "Branch Prediction Accuracy"
+    mode: count
+    depends: [bp_predict, bp_mispredict]  # 依赖多个任务
+    scope: tb.cpu.exu
+    condition:
+      $and:
+        - [branch_commit, ==, 1]
+        - [$dep.bp_predict.pred_target, ==, actual_target]
+  
+  # ============================================
+  # 复杂依赖示例：取指-译码-执行流水线追踪
+  # ============================================
+  - id: fetch_stage
+    name: "Capture Fetch Stage"
+    mode: capture
+    scope: tb.cpu.ifu
+    condition:
+      - [fetch_valid, ==, 1]
+    capture:
+      - fetch_pc
+      - fetch_inst
+    export:
+      fetch_pc: fetch_pc
+      fetch_inst: fetch_inst
+    output:
+      format: hex
+      file: fetch_stage.csv
+  
+  - id: decode_stage
+    name: "Capture Decode Stage"
+    mode: capture
+    depends: fetch_stage
+    scope: tb.cpu.idu
+    condition:
+      $and:
+        - [decode_valid, ==, 1]
+        - [$dep.fetch_stage.fetch_pc, ==, decode_pc]
+    capture:
+      - $dep.fetch_stage.fetch_pc
+      - decode_pc
+      - rs1
+      - rs2
+      - rd
+    export:
+      decode_pc: decode_pc
+      decode_inst: $dep.fetch_stage.fetch_inst
+    output:
+      format: hex
+      file: decode_stage.csv
+  
+  - name: "Execute Stage Analysis"
+    mode: count
+    depends: decode_stage
+    scope: tb.cpu.exu
+    condition:
+      $and:
+        - [valid, ==, 1]
+        - [$dep.decode_stage.decode_pc, ==, pc]
+  
+  # ============================================
+  # 位操作 + 依赖示例
+  # ============================================
+  - id: cache_miss
+    name: "Capture Cache Misses"
+    mode: capture
+    scope: tb.cpu.lsu
+    condition:
+      $and:
+        - [req_valid, ==, 1]
+        - [[cache_hit, &, 1], ==, 0]
+    capture:
+      - req_addr
+      - req_type
+    export:
+      miss_addr: req_addr
+    output:
+      format: hex
+      file: cache_misses.csv
+  
+  - name: "Track Cache Miss Resolution"
+    mode: count
+    depends: cache_miss
+    scope: tb.cpu.lsu
+    condition:
+      $and:
+        - [refill_valid, ==, 1]
+        - [$dep.cache_miss.miss_addr, ==, refill_addr]
+  
+  # ============================================
+  # 绝对路径示例：访问其他模块
+  # ============================================
+  - name: "Cross-Module Signal Check"
+    mode: count
+    scope: tb.cpu.ifu  # 当前在IFU
+    condition:
+      $and:
+        - [fetch_valid, ==, 1]  # 相对路径 -> tb.cpu.ifu.fetch_valid
+        - [tb.mem.ready, ==, 1]  # 绝对路径 -> tb.mem.ready (不受scope影响)
