@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 from pathlib import Path
-from typing import Any
-from yaml_builder import YamlBuilder
+from typing import Any, List
+from yaml_builder import YamlBuilder, Task
 from fsdb_builder import FsdbBuilder
 from condition_builder import ConditionBuilder
 
@@ -44,14 +44,15 @@ class FsdbAnalyzer:
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder: ConditionBuilder = ConditionBuilder(self.fsdb_builder, self.yaml_builder)
 
-    def _trace_trigger(self, task: dict[str, Any],
-                       capture_signals: list[str], 
-                       condition: str) -> list[dict[str, Any]]:
+    def _trace_trigger(self, task: Task) -> list[dict[str, Any]]:
         """Normal mode: match all rows globally"""
+        capture_signals = task.capture
         print(f"Evaluating condition for {len(capture_signals)} signal(s)")
 
-        # Build condition once
-        cond = self.cond_builder.build(condition, task, self.global_scope)
+        # Build condition once if not already built
+        if task.condition is None:
+            task.condition = self.cond_builder.build(task.raw_condition, task, self.global_scope)
+        cond = task.condition
 
         signal_data = {}
         for sig in capture_signals:
@@ -59,7 +60,7 @@ class FsdbAnalyzer:
                 signal_data[sig] = self.fsdb_builder.dump_signal(sig)
 
         max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
-        log_format = task.get('logging')
+        log_format = task.logging
 
         # Evaluate condition for each row
         matched_rows = []
@@ -67,7 +68,7 @@ class FsdbAnalyzer:
             try:
                 runtime_data = {'row_idx': row_idx, 'upstream_row': {}, 'upstream_data': {}}
                 if self.cond_builder.exec(cond, runtime_data):
-                    captured_vars = task.get('_captured_vars', {})
+                    captured_vars = task.metadata.get('_captured_vars', {})
 
                     # Resolve capture signals with captured variables
                     actual_capture_signals = []
@@ -76,7 +77,7 @@ class FsdbAnalyzer:
                             actual_sig = sig
                             for var_name, var_val in captured_vars.items():
                                 actual_sig = actual_sig.replace(f'{{{var_name}}}', var_val)
-                            actual_sig = self.yaml_builder._resolve_signal_path(actual_sig, task.get('scope', ''), self.global_scope)
+                            actual_sig = self.yaml_builder._resolve_signal_path(actual_sig, task.scope or '', self.global_scope)
                             actual_capture_signals.append(actual_sig)
                         else:
                             actual_capture_signals.append(sig)
@@ -96,18 +97,17 @@ class FsdbAnalyzer:
                     matched_rows.append(row_data)
 
                     if log_format:
-                        log_msg = self.yaml_builder.format_log_message(log_format, row_data, actual_capture_signals, row_idx)
+                        log_msg = self.yaml_builder.format_log(log_format, row_data, actual_capture_signals, row_idx)
                         print(f"  [LOG] {log_msg}")
             except Exception as e:
                 print(f"[WARN] Error evaluating condition at row {row_idx}: {e}")
 
         return matched_rows
 
-    def _trace_depends(self, task: dict[str, Any],
-                             capture_signals: list[str],
-                             condition: str) -> list[dict[str, Any]]:
+    def _trace_depends(self, task: Task) -> list[dict[str, Any]]:
         """Trace mode: match from upstream dependent task"""
-        depends = task.get('dependsOn', [])
+        capture_signals = task.capture
+        depends = task.deps
         dep_id = depends[0] if depends else None
 
         if dep_id not in self.runtime_data:
@@ -120,15 +120,17 @@ class FsdbAnalyzer:
         if self.verbose and upstream_rows:
             print(f"  First upstream row: time={upstream_rows[0]['time']}, signals={list(upstream_rows[0]['signals'].keys())}")
 
-        # Build condition once
-        cond = self.cond_builder.build(condition, task, self.global_scope)
+        # Build condition once if not already built
+        if task.condition is None:
+            task.condition = self.cond_builder.build(task.raw_condition, task, self.global_scope)
+        cond = task.condition
 
         signal_data = {}
         for sig in capture_signals:
             signal_data[sig] = self.fsdb_builder.dump_signal(sig)
         max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
 
-        log_format = task.get('logging')
+        log_format = task.logging
 
         # For each upstream row, search forward
         matched_rows = []
@@ -153,7 +155,7 @@ class FsdbAnalyzer:
                         if self.verbose:
                             print(f"    Found match at time {row_idx}")
                         if log_format:
-                            log_msg = self.yaml_builder.format_log_message(log_format, row_data, capture_signals, row_idx)
+                            log_msg = self.yaml_builder.format_log(log_format, row_data, capture_signals, row_idx)
                             print(f"  [LOG] {log_msg}")
                         break
                 except Exception as e:
@@ -166,34 +168,24 @@ class FsdbAnalyzer:
 
         return matched_rows
 
-    def _capture_task(self, task: dict[str, Any], task_id: str) -> str:
+    def _capture_task(self, task: Task, task_id: str) -> str:
         """Execute capture mode task"""
-        condition = task.get('condition','')
-
-        # Use pre-resolved capture signals from YamlBuilder
-        capture_signals = task.get('resolved_capture', [])
-
         # Resolve $dep references in capture signals
-        capture_signals = self.yaml_builder.resolve_dep_references(capture_signals, task_id, self.runtime_data)
+        task.capture = self.yaml_builder.resolve_dep_references(task.capture, task_id, self.runtime_data)
 
         # Detect trace mode using pre-analyzed flag
-        depends = task.get('dependsOn')
-        has_dep = task.get('has_dep_in_condition', False)
-
-        if depends and has_dep:
+        if task.deps and task.has_dep_in_condition:
             # Trace: match from upstream
-            matched_rows = self._trace_depends(task, capture_signals, condition)
+            matched_rows = self._trace_depends(task)
         else:
             # Trigger: match all time (Start point)
-            matched_rows = self._trace_trigger(task, capture_signals, condition)
+            matched_rows = self._trace_trigger(task)
 
         # Store to memory
         self.runtime_data[task_id] = {
             'rows': matched_rows,
-            'signals': capture_signals  # All captured signals are available for reference
+            'signals': task.capture  # All captured signals are available for reference
         }
-        # print(matched_rows)
-        # print(capture_signals)
 
         print(f"Matched {len(matched_rows)} rows")
 
@@ -223,13 +215,13 @@ class FsdbAnalyzer:
         results = []
         for exec_idx, task_idx in enumerate(task_exec_order, 1):
             task = tasks[task_idx]
-            task_id = task.get('id', f'task_{task_idx}')
+            task_id = task.id or f'task_{task_idx}'
             # Use name for display, fallback to id
-            task_name = task.get('name') or task.get('id') or f'Task {exec_idx}'
+            task_name = task.name or task.id or f'Task {exec_idx}'
 
             print(f"\n[Task {exec_idx}/{len(tasks)}] {task_name}")
-            if task.get('dependsOn'):
-                print(f"  Depends on: {', '.join(task['dependsOn'])}")
+            if task.deps:
+                print(f"  Depends on: {', '.join(task.deps)}")
             print(f"{'-'*70}")
 
             try:

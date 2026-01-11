@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import re
-from typing import Any, Callable, List
+from typing import Any, Callable, List, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from yaml_builder import Task
 
 
 @dataclass
@@ -18,9 +21,9 @@ class ConditionBuilder:
         self.fsdb_builder = fsdb_builder
         self.yaml_builder = yaml_builder
 
-    def build(self, condition_str: str, task: dict[str, Any], global_scope: str) -> Condition:
+    def build(self, condition_str: str, task: 'Task', global_scope: str) -> Condition:
         """Build a condition from string"""
-        task_scope = task.get('scope', '')
+        task_scope = task.scope or ''
 
         if '{' in condition_str and '}' in condition_str:
             evaluator = self._build_pattern_evaluator(condition_str, task, task_scope, global_scope)
@@ -85,7 +88,7 @@ class ConditionBuilder:
 
         return evaluator
 
-    def _build_pattern_evaluator(self, condition_str: str, task: dict[str, Any],
+    def _build_pattern_evaluator(self, condition_str: str, task: 'Task',
                                  task_scope: str, global_scope: str) -> Callable[[dict[str, Any]], bool]:
         """Build evaluator for pattern matching conditions"""
         patterns = re.findall(r'[\w.]+\{[\w]+\}[\w.\[\]:]*', condition_str)
@@ -127,14 +130,14 @@ class ConditionBuilder:
             if len(matched_values) == 0:
                 return False
             elif len(matched_values) == 1:
-                task['_captured_vars'] = {var_name: matched_values[0]}
+                task.metadata['_captured_vars'] = {var_name: matched_values[0]}
                 return True
             else:
                 raise ValueError(f"Ambiguous pattern match: multiple values matched {matched_values} for variable '{var_name}'")
 
         return evaluator
 
-    def _build_containment_evaluator(self, condition_str: str, task: dict[str, Any],
+    def _build_containment_evaluator(self, condition_str: str, task: 'Task',
                                     task_scope: str, global_scope: str) -> Callable[[dict[str, Any]], bool]:
         """Build evaluator for containment operator <@"""
         parts = condition_str.split('<@')
