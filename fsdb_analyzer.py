@@ -43,15 +43,29 @@ class FsdbAnalyzer:
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder = ConditionBuilder()
 
+    def _expand_templates(self, templates: list[str], vars: dict[str, str], task_scope: str) -> list[str]:
+        """Expand signal templates with resolved variables"""
+        signals = []
+        for tmpl in templates:
+            if isinstance(tmpl, str) and "{" in tmpl:
+                sig = tmpl
+                for var_name, var_val in vars.items():
+                    sig = sig.replace(f"{{{var_name}}}", var_val)
+                sig = resolve_signal_path(sig, task_scope, self.global_scope)
+                signals.append(sig)
+            else:
+                signals.append(tmpl)
+        return signals
+
     def _trace_trigger(self, task: Task) -> list[dict[str, Any]]:
         """Normal mode: match all rows globally"""
-        capture_signals = task.capture
-        print(f"Evaluating condition for {len(capture_signals)} signal(s)")
+        templates = task.capture
+        print(f"Evaluating condition for {len(templates)} signal(s)")
 
         cond = task.condition
 
         # Collect all signals needed (from both capture and condition)
-        all_needed_signals = set(capture_signals)
+        all_needed_signals = set(templates)
         # Get signals from condition by parsing the condition expression
         # This is a simplified approach - we collect all signals that were resolved during config
         for sig in self.yaml_builder.collect_signals(self.global_scope):
@@ -81,28 +95,14 @@ class FsdbAnalyzer:
                     "signal_values": signal_values,
                     "upstream_row": {},
                     "upstream_data": {},
+                    "vars": {},
                 }
                 if self.cond_builder.exec(cond, runtime_data):
-                    captured_vars = task.metadata.get("_captured_vars", {})
-
-                    # Resolve capture signals with captured variables
-                    actual_capture_signals = []
-                    for sig in capture_signals:
-                        if isinstance(sig, str) and "{" in sig:
-                            actual_sig = sig
-                            for var_name, var_val in captured_vars.items():
-                                actual_sig = actual_sig.replace(
-                                    f"{{{var_name}}}", var_val
-                                )
-                            actual_sig = resolve_signal_path(
-                                actual_sig, task.scope or "", self.global_scope
-                            )
-                            actual_capture_signals.append(actual_sig)
-                        else:
-                            actual_capture_signals.append(sig)
+                    vars = runtime_data.get("vars", {})
+                    signals = self._expand_templates(templates, vars, task.scope or "")
 
                     row_data = {"time": row_idx, "capd": {}}
-                    for sig in actual_capture_signals:
+                    for sig in signals:
                         if sig in signal_data:
                             vals = signal_data[sig]
                             row_data["capd"][sig] = (
@@ -121,7 +121,7 @@ class FsdbAnalyzer:
 
                     if log_format:
                         log_msg = self.yaml_builder.format_log(
-                            log_format, row_data, actual_capture_signals, row_idx
+                            log_format, row_data, signals, row_idx
                         )
                         print(f"  [LOG] {log_msg}")
             except Exception as e:
@@ -131,7 +131,7 @@ class FsdbAnalyzer:
 
     def _trace_depends(self, task: Task) -> list[dict[str, Any]]:
         """Trace mode: match from upstream dependent task"""
-        capture_signals = task.capture
+        templates = task.capture
         depends = task.deps
         dep_id = depends[0] if depends else None
 
@@ -154,7 +154,7 @@ class FsdbAnalyzer:
         cond = task.condition
 
         signal_data = {}
-        for sig in capture_signals:
+        for sig in templates:
             signal_data[sig] = self.fsdb_builder.get_signal(sig)
         max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
 
@@ -181,10 +181,11 @@ class FsdbAnalyzer:
                         "signal_values": signal_values,
                         "upstream_row": upstream_row,
                         "upstream_data": upstream_data,
+                        "vars": {},
                     }
                     if self.cond_builder.exec(cond, runtime_data):
                         row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
-                        for sig in capture_signals:
+                        for sig in templates:
                             vals = signal_data[sig]
                             row_data["capd"][sig] = (
                                 vals[row_idx] if row_idx < len(vals) else "0"
@@ -195,7 +196,7 @@ class FsdbAnalyzer:
                             print(f"    Found match at time {row_idx}")
                         if log_format:
                             log_msg = self.yaml_builder.format_log(
-                                log_format, row_data, capture_signals, row_idx
+                                log_format, row_data, templates, row_idx
                             )
                             print(f"  [LOG] {log_msg}")
                         break
@@ -241,11 +242,10 @@ class FsdbAnalyzer:
         self.fsdb_builder.dump_signals(soi)
 
         # Build all conditions after signals are dumped
-        all_signals = self.fsdb_builder.get_signals_index()
         for task in tasks:
             if task.condition is None:
                 task.condition = self.cond_builder.build(
-                    task, self.global_scope, all_signals
+                    task, self.global_scope, self.fsdb_builder
                 )
 
         print(f"\n{'=' * 70}")

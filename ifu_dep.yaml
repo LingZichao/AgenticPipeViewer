@@ -36,3 +36,4 @@ tasks:
   #     - && ifu_idu_ib_inst{idx}_data[31: 0] <@ $dep.biu_read.biu_ifu_rd_data.$split(4)
 
   #   capture:
+  #     - ifu_idu_ib_inst{idx}_data

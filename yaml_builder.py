@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Union, Any, List, Optional
 from dataclasses import dataclass, field
 from utils import resolve_signal_path
-
+from condition_builder import Condition
 
 @dataclass
 class Task:
@@ -23,7 +23,7 @@ class Task:
     deps: List[str] = field(default_factory=list)
     logging: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    condition: Any = None  # Built Condition object, set later
+    condition: Optional[Condition] = None  # Built Condition object, set later
 
     @classmethod
     def from_dict(
@@ -158,7 +158,13 @@ class YamlBuilder:
     def resolve_config(
         self, config: dict[str, Any]
     ) -> dict[str, Any]:
-        """Resolve config by converting dict tasks to Task objects"""
+        """Resolve config by converting dict tasks to Task objects
+
+        Args:
+            config: Raw config dictionary
+            cond_builder: Optional ConditionBuilder instance
+            all_signals: Optional list of all available signals from FSDB
+        """
         self.config = config
 
         # Convert dict tasks to Task objects
