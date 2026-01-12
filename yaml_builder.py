@@ -179,14 +179,16 @@ class YamlBuilder:
         self._tasks_resolved = True
         return config
 
-    def collect_signals(self, global_scope: str) -> List[str]:
-        """Collect all signals from all tasks (capture + condition)
+    def collect_raw_signals(self, global_scope: str) -> List[str]:
+        """Collect all raw signals-of-interest from all tasks (capture + condition)
+
+        Signals may contain wildcard patterns like {*} which will be expanded by fsdb_builder.
 
         Args:
             global_scope: Global scope for signal resolution
 
         Returns:
-            List of all signals needed
+            List of all raw signals (may contain {*} patterns)
         """
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
@@ -199,24 +201,17 @@ class YamlBuilder:
                 # Task already has resolved scope
                 for sig in task.capture:
                     if isinstance(sig, str):
-                        all_signals.add(sig)
+                        # Replace {var} patterns with {*}
+                        # Note: Bit ranges like [31:0] are preserved as-is
+                        # They are NOT part of signal name, but part of condition expression
+                        normalized_sig = re.sub(r'\{[^}]+\}', '{*}', sig)
+                        all_signals.add(normalized_sig)
                 if task.raw_condition:
                     self._collect_signals_from_condition(
                         task.raw_condition, task.scope or "", all_signals
                     )
             else:
-                # Fallback for dict (during load_config phase)
-                task_scope = task.get("scope", "")
-                final_scope = task_scope if task_scope else global_scope
-                for sig in task.get("capture", []):
-                    if isinstance(sig, str):
-                        resolved = self._resolve_signal_path(sig, final_scope)
-                        all_signals.add(resolved)
-                raw_condition = task.get("condition")
-                if raw_condition:
-                    self._collect_signals_from_condition(
-                        raw_condition, final_scope, all_signals
-                    )
+                raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
 
         return list(all_signals)
 
@@ -241,9 +236,24 @@ class YamlBuilder:
         """Extract signal identifiers from Python expression using AST"""
         condition_str = self._normalize_condition(condition)
 
-        # Remove $dep references and Verilog literals before parsing
+        # Extract pattern signals like signal{var} before normalization
+        # Note: This regex intentionally does NOT capture bit range [msb:lsb]
+        # Bit ranges are part of the condition expression, not the signal name
+        # Example: "sig{idx}[31:0]" -> extracts "sig{idx}", leaves "[31:0]" in condition
+        pattern_signals = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", condition_str)
+        for pattern in pattern_signals:
+            # Replace {var} with {*} and resolve with scope
+            normalized_pattern = re.sub(r'\{[^}]+\}', '{*}', pattern)
+            resolved = self._resolve_signal_path(normalized_pattern, scope)
+            signals.add(resolved)
+
+        # Remove $dep references, $split() calls, and Verilog literals before parsing
         condition_str = re.sub(r"\$dep\.\w+\.\w+", "0", condition_str)
+        condition_str = re.sub(r"\.\$split\([^)]+\)", "", condition_str)  # Remove .$split(n)
         condition_str = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", "0", condition_str)
+        # Remove pattern signals to avoid parsing them as regular signals
+        for pattern in pattern_signals:
+            condition_str = condition_str.replace(pattern, "0")
 
         try:
             tree = ast.parse(condition_str, mode="eval")
@@ -564,18 +574,14 @@ class YamlBuilder:
             scope: Resolved scope for this task
 
         Returns:
-            List of resolved signal paths
+            List of resolved signal paths (patterns preserved)
         """
         resolved_signals: list[str] = []
         for sig in capture_signals:
             if isinstance(sig, str):
-                # Check if signal contains {var} pattern
-                if "{" in sig and "}" in sig:
-                    # Will be resolved per-row during matching
-                    resolved_signals.append(sig)
-                else:
-                    resolved_sig = self._resolve_signal_path(sig, scope)
-                    resolved_signals.append(resolved_sig)
+                # Always resolve with scope, even if it contains {var} pattern
+                resolved_sig = self._resolve_signal_path(sig, scope)
+                resolved_signals.append(resolved_sig)
             else:
                 resolved_signals.append(str(sig))
         return resolved_signals

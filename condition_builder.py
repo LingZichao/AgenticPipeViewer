@@ -67,16 +67,9 @@ class ExpressionEvaluator(ast.NodeVisitor):
             r"([\w_]+(?:\[\d+:\d+\])?)\.\$split\(", r"_split(\1, ", normalized
         )
 
-        # Transform <@ to _contains() function call
-        # Match: left <@ right -> _contains(left, right)
-        # Use a more robust approach: find <@ and wrap the entire expression
-        if "<@" in normalized:
-            # Replace <@ with a unique marker first
-            normalized = normalized.replace("<@", " __CONTAINS_OP__ ")
-            # Then wrap with _contains()
-            parts = normalized.split(" __CONTAINS_OP__ ")
-            if len(parts) == 2:
-                normalized = f"_contains({parts[0].strip()}, {parts[1].strip()})"
+        # Transform <@ to a comparison operator that Python can parse
+        # We'll use 'in' operator, ensuring proper spacing
+        normalized = normalized.replace("<@", " in ")
 
         tree = ast.parse(normalized, mode="eval")
         return self.visit(tree.body)
@@ -116,16 +109,29 @@ class ExpressionEvaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         for op, comparator in zip(node.ops, node.comparators):
             right = self.visit(comparator)
-            ops = {
-                ast.Eq: lambda: left == right,
-                ast.NotEq: lambda: left != right,
-                ast.Lt: lambda: left < right,
-                ast.LtE: lambda: left <= right,
-                ast.Gt: lambda: left > right,
-                ast.GtE: lambda: left >= right,
-            }
-            if not ops[type(op)]():
-                return False
+            if isinstance(op, ast.In):
+                # Handle <@ operator (converted to 'in')
+                if isinstance(right, SignalGroup):
+                    if not isinstance(left, int):
+                        raise ValueError(f"Left operand of <@ must be int, got {type(left)}")
+                    result = right.contains(left)
+                    print(f"[DEBUG] {hex(left)} <@ {[hex(v) for v in right.values]} = {result}")
+                    if not result:
+                        return False
+                else:
+                    if left != right:
+                        return False
+            else:
+                ops = {
+                    ast.Eq: lambda: left == right,
+                    ast.NotEq: lambda: left != right,
+                    ast.Lt: lambda: left < right,
+                    ast.LtE: lambda: left <= right,
+                    ast.Gt: lambda: left > right,
+                    ast.GtE: lambda: left >= right,
+                }
+                if not ops[type(op)]():
+                    return False
             left = right
         return True
 
@@ -141,7 +147,9 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     raise ValueError("_split() requires exactly 2 arguments")
                 signal_val = self.visit(node.args[0])
                 num_parts = self.visit(node.args[1])
-                return SignalGroup(values=split_signal(hex(signal_val), num_parts))
+                result = SignalGroup(values=split_signal(hex(signal_val), num_parts))
+                print(f"[DEBUG] $split({hex(signal_val)}, {num_parts}) = {[hex(v) for v in result.values]}")
+                return result
             elif node.func.id == "_contains":
                 # _contains(value, group) -> bool
                 if len(node.args) != 2:
@@ -150,7 +158,9 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 right_val = self.visit(node.args[1])
                 # Right side should be a SignalGroup
                 if isinstance(right_val, SignalGroup):
-                    return right_val.contains(left_val)
+                    result = right_val.contains(left_val)
+                    print(f"[DEBUG] {hex(left_val)} <@ {[hex(v) for v in right_val.values]} = {result}")
+                    return result
                 # If not a group, treat as single value comparison
                 return left_val == right_val
         raise ValueError(f"Unsupported function call: {ast.unparse(node)}")
@@ -214,11 +224,15 @@ class ConditionBuilder:
     def build(self, task: "Task", fsdb_builder: "FsdbBuilder") -> Condition:
         """Build a condition from task"""
         scope = task.scope or ""
-        condition_str = task.raw_condition
+        # Convert && to and, || to or
+        condition_str = task.raw_condition.replace("&&", " and ").replace("||", " or ")
+        # Normalize whitespace: collapse multiple spaces to single space
+        condition_str = re.sub(r'\s+', ' ', condition_str).strip()
         has_pattern = "{" in condition_str and "}" in condition_str
 
         if has_pattern:
-            patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.\[\]:]*", condition_str)
+            # Pattern should only match signal name, not bit selection [31:0]
+            patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", condition_str)
             var_names = set()
             for p in patterns:
                 var_names.update(re.findall(r"\{(\w+)\}", p))
@@ -245,14 +259,26 @@ class ConditionBuilder:
     ) -> Callable[[dict[str, Any]], bool]:
         """Build evaluator for pattern conditions"""
 
-        def evaluator(runtime_data: dict[str, Any]) -> bool:
-            possible_vals = set()
-            for pattern in patterns:
-                for _, captured in fsdb_builder.find_matching_signals(pattern, scope):
-                    if var_name in captured:
-                        possible_vals.add(captured[var_name])
+        # Pre-compute all possible values at build time and print debug info
+        possible_vals = set()
+        # print(f"[DEBUG] Building pattern evaluator for variable '{var_name}'")
+        for pattern in patterns:
+            matches = fsdb_builder.find_matching_signals(pattern, scope)
+            # print(f"[DEBUG] Pattern '{pattern}' matched {len(matches)} signals:")
+            for sig, captured in matches:
+                # if len(matches) <= 10:  # Only print details if not too many
+                #     print(f"  - {sig} (captured: {captured})")
+                if var_name in captured:
+                    possible_vals.add(captured[var_name])
+            # if len(matches) > 10:
+            #     print(f"  (showing first 10 of {len(matches)} matches)")
+            #     for sig, captured in list(matches)[:10]:
+            #         print(f"  - {sig} (captured: {captured})")
 
-            candidates = SignalGroup(values=list(possible_vals))
+        # print(f"[DEBUG] Possible values for '{var_name}': {sorted(possible_vals)}")
+        candidates = SignalGroup(values=list(possible_vals))
+
+        def evaluator(runtime_data: dict[str, Any]) -> bool:
 
             def test_value(val: str) -> bool:
                 test_cond = condition_str
@@ -261,9 +287,16 @@ class ConditionBuilder:
                         pattern, pattern.replace(f"{{{var_name}}}", val)
                     )
                 try:
+                    # print(f"[DEBUG] Testing {var_name}={val}: {test_cond[:100]}...")
+                    # Debug: print signal values
+                    # signal_values = runtime_data.get("signal_values", {})
+                    # print(f"[DEBUG] Available signals: {list(signal_values.keys())[:5]}...")
                     expr_eval = ExpressionEvaluator(scope, runtime_data)
-                    return bool(expr_eval.eval(test_cond))
-                except (ValueError, RuntimeError, KeyError):
+                    result = bool(expr_eval.eval(test_cond))
+                    # print(f"[DEBUG] Result for {var_name}={val}: {result}")
+                    return result
+                except (ValueError, RuntimeError, KeyError) as e:
+                    # print(f"[DEBUG] Error for {var_name}={val}: {e}")
                     return False
 
             matched_group = candidates.filter(test_value)

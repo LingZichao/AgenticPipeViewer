@@ -14,9 +14,10 @@ class FsdbBuilder:
         self.fsdb_file: Path = fsdb_file
         self.verbose: bool = verbose
         self.output_dir: Path = output_dir
-        self.signal_cache: Dict[str, List[str]] = {}
+        self.signal_cache: Dict[str, List[str]] = {}  # Normalized name -> values
         self.signal_widths: Dict[str, tuple[int, int]] = {}
         self.all_signals_list: List[str] = []
+        self.signal_name_map: Dict[str, str] = {}  # Normalized name -> FSDB name with bitwidth
 
     def to_fsdb_path(self, signal: str) -> str:
         """Convert signal path from dot notation to FSDB format (slash)"""
@@ -69,19 +70,79 @@ class FsdbBuilder:
             return self.signal_cache[signal]
         raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")
 
+    def expand_raw_signals(self, raw_signals: List[str]) -> List[str]:
+        """Expand raw signals containing {*} patterns to actual signal names
+
+        Note: This method handles two types of bit ranges:
+        1. FSDB signal bit width: e.g., signal[127:0] in FSDB index
+        2. Pattern with bit range: e.g., signal{*}[31:0] (bit range is NOT expanded)
+
+        Args:
+            raw_signals: List of signal patterns, may contain {*} wildcards
+
+        Returns:
+            List of actual signal names with patterns expanded
+        """
+        all_signals = self.get_signals_index()
+        expanded = []
+
+        for sig in raw_signals:
+            if "{*}" in sig:
+                # Convert pattern to regex: signal{*} -> signal[a-zA-Z0-9_$]+
+                # Match any valid Verilog identifier characters
+                regex_pattern = "^" + re.escape(sig).replace(r"\{\*\}", r"[a-zA-Z0-9_$]+")
+                regex_pattern += r"(?:\[\d+:\d+\])?$"  # Allow optional bit range
+
+                matches = []
+                for fsdb_sig in all_signals:
+                    sig_dot = fsdb_sig.replace("/", ".").lstrip(".")
+                    if re.match(regex_pattern, sig_dot):
+                        matches.append(sig_dot)
+                        expanded.append(sig_dot)
+            else:
+                # For non-pattern signals, try to match with bit range
+                matched = False
+                for fsdb_sig in all_signals:
+                    sig_dot = fsdb_sig.replace("/", ".").lstrip(".")
+                    # Exact match or match with bit range
+                    if sig_dot == sig or sig_dot.startswith(sig + "["):
+                        expanded.append(sig_dot)
+                        matched = True
+                        break
+                if not matched:
+                    expanded.append(sig)
+
+        return expanded
+
     def dump_signals(self, signals: List[str]) -> None:
         """Dump all signals at once using single fsdbreport call"""
         if not signals:
             return
 
-        fsdb_paths = [self.to_fsdb_path(sig) for sig in signals]
+        # Expand patterns with {*} - this already handles bit ranges
+        matched_signals = self.expand_raw_signals(signals)
+
+        print(f"[DEBUG] Total signals after expansion: {len(matched_signals)}")
+        for sig in matched_signals:
+            print(f"  - {sig}")
+
+        if not matched_signals:
+            print("[WARN] No signals found in FSDB")
+            return
+
+        # Build mapping: normalized name (without bitwidth) -> FSDB name (with bitwidth)
+        for sig in matched_signals:
+            normalized = re.sub(r'\[\d+:\d+\]$', '', sig)  # Remove trailing [msb:lsb]
+            self.signal_name_map[normalized] = sig
+
+        fsdb_paths = [self.to_fsdb_path(sig) for sig in matched_signals]
 
         tmp_file = self.output_dir / '.fsdb_dump_tmp.txt'
 
         try:
             cmd = ['fsdbreport', str(self.fsdb_file.absolute()), '-of', 'h', '-w', '1024', '-s'] + fsdb_paths + ['-o', tmp_file]
 
-            print(f"[INFO] Dumping {len(signals)} signal(s) from FSDB...")
+            print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB...")
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   universal_newlines=True, timeout=120)
             if result.returncode != 0:
@@ -104,8 +165,10 @@ class FsdbBuilder:
             if header_idx == -1:
                 raise RuntimeError("Cannot find header in fsdbreport output")
 
-            for sig in signals:
-                self.signal_cache[sig] = []
+            # Initialize cache for original signal names (without bit ranges)
+            for sig in matched_signals:
+                normalized = re.sub(r'\[\d+:\d+\]$', '', sig)
+                self.signal_cache[normalized] = []
 
             data_start = header_idx + 2
 
@@ -117,8 +180,9 @@ class FsdbBuilder:
                     continue
 
                 for idx, val in enumerate(parts[1:]):
-                    if idx < len(signals):
-                        self.signal_cache[signals[idx]].append(val)
+                    if idx < len(matched_signals):
+                        normalized = re.sub(r'\[\d+:\d+\]$', '', matched_signals[idx])
+                        self.signal_cache[normalized].append(val)
 
         finally:
             if not self.verbose and os.path.exists(tmp_file):
@@ -134,7 +198,8 @@ class FsdbBuilder:
         regex_pattern = "^" + re.escape(pattern)
         for var in var_pattern:
             regex_pattern = regex_pattern.replace(re.escape(f"{{{var}}}"), r"(\d+)")
-        regex_pattern += "$"
+        # Allow optional bit range at the end: [72:0]
+        regex_pattern += r"(?:\[\d+:\d+\])?$"
 
         matches = []
         for sig in self.all_signals_list:

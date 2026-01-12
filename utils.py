@@ -55,3 +55,25 @@ def verilog_to_int(match: re.Match[str]) -> str:
     base_map = {'b': 2, 'o': 8, 'd': 10, 'h': 16}
     base = base_map.get(parts[1][0].lower(), 10)
     return str(int(parts[1][1:].replace('_', ''), base))
+
+def match_signal_with_bitwidth(signal: str, available_signals: list[str]) -> str:
+    """Match a signal name with its FSDB representation (may include bit range)
+
+    Args:
+        signal: Signal name to match
+        available_signals: List of available signals from FSDB
+
+    Returns:
+        Matched signal name (with bit range if present), or original signal if no match
+    """
+    # Try exact match first
+    if signal in available_signals:
+        return signal
+
+    # Try to find signal with bit range (e.g., sig[127:0])
+    pattern = re.escape(signal) + r"(\[\d+:\d+\])?"
+    for fsdb_sig in available_signals:
+        if re.match(f"^{pattern}$", fsdb_sig):
+            return fsdb_sig
+
+    return signal

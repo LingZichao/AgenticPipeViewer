@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import re
 from pathlib import Path
 from typing import Any
 from yaml_builder import YamlBuilder, Task
@@ -68,7 +69,7 @@ class FsdbAnalyzer:
         all_needed_signals = set(templates)
         # Get signals from condition by parsing the condition expression
         # This is a simplified approach - we collect all signals that were resolved during config
-        for sig in self.yaml_builder.collect_signals(self.global_scope):
+        for sig in self.yaml_builder.collect_raw_signals(self.global_scope):
             all_needed_signals.add(sig)
 
         signal_data = {}
@@ -153,11 +154,41 @@ class FsdbAnalyzer:
 
         cond = task.condition
 
-        signal_data = {}
-        for sig in templates:
-            signal_data[sig] = self.fsdb_builder.get_signal(sig)
-        max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
+        # Collect all signals needed: from capture and from condition
+        all_signal_names = set()
+        pattern_mappings = {}
 
+        # From capture
+        for sig in templates:
+            if "{" in sig:
+                matches = self.fsdb_builder.find_matching_signals(sig, task.scope or "")
+                actual_signals = [match[0] for match in matches]
+                pattern_mappings[sig] = actual_signals
+                all_signal_names.update(actual_signals)
+            else:
+                all_signal_names.add(sig)
+
+        # From condition - extract pattern signals
+        if task.raw_condition and "{" in task.raw_condition:
+            patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", task.raw_condition)
+            for pattern in patterns:
+                matches = self.fsdb_builder.find_matching_signals(pattern, task.scope or "")
+                for match_sig, _ in matches:
+                    all_signal_names.add(match_sig)
+
+        # Load all signals
+        signal_data = {}
+        for sig in all_signal_names:
+            try:
+                signal_data[sig] = self.fsdb_builder.get_signal(sig)
+            except RuntimeError:
+                print(f"[WARN] Signal {sig} not found in cache, skipping")
+
+        if not signal_data:
+            print("[WARN] No signals loaded for condition evaluation")
+            return []
+
+        max_len = max(len(vals) for vals in signal_data.values())
         log_format = task.logging
 
         # For each upstream row, search forward
@@ -238,9 +269,13 @@ class FsdbAnalyzer:
         tasks : list[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
         # Collect all signals-of-interest from all tasks using YamlBuilder
-        soi = self.yaml_builder.collect_signals(self.global_scope)
+        soi = self.yaml_builder.collect_raw_signals(self.global_scope)
+        print(f"[DEBUG] Collected {len(soi)} raw signals")
+        for sig in soi:
+            print(f"  - {sig}")
         self.fsdb_builder.dump_signals(soi)
 
+        input()
         # Build all conditions after signals are dumped
         for task in tasks:
             if task.condition is None:
