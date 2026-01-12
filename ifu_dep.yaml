@@ -16,7 +16,7 @@ tasks:
   - id: biu_read
     name: "BIU Read Data Valid Cycles"
     condition:
-      - biu_ifu_rd_data_vld == 1'b1
+      - "biu_ifu_rd_data_vld == 1'b1"
  
     capture:
       - biu_ifu_rd_data
@@ -27,13 +27,13 @@ tasks:
   # ============================================
   # 下游任务1：使用$dep引用
   # ============================================
-  # - id: ifu2idu
-  #   name: "Capture IFU to IDU Queue"
-  #   dependsOn: biu_read    # 声明依赖
+  - id: ifu2idu
+    name: "Capture IFU to IDU Queue"
+    dependsOn: biu_read    # 声明依赖
 
-  #   condition:
-  #     - ifu_idu_ib_inst{idx}_vld == 1'b1
-  #     - && ifu_idu_ib_inst{idx}_data[31: 0] <@ $dep.biu_read.biu_ifu_rd_data.$split(4)
+    condition:
+      - "ifu_idu_ib_inst{idx}_vld == 1'b1"
+      - "&& ifu_idu_ib_inst{idx}_data[31: 0] <@ $dep.biu_read.biu_ifu_rd_data.$split(4)"
 
-  #   capture:
-  #     - ifu_idu_ib_inst{idx}_data
+    capture:
+      - ifu_idu_ib_inst{idx}_data
