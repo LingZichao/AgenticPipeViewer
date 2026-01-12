@@ -35,8 +35,10 @@ class FsdbBuilder:
         if result.returncode != 0:
             raise RuntimeError(f"Failed to get signal hierarchy: {result.stderr}")
 
+        # fsdbdebug outputs to stderr, not stdout
+        output = result.stderr if result.stderr else result.stdout
         signals = []
-        for line in result.stdout.split('\n'):
+        for line in output.split('\n'):
             line = line.strip()
             if not line.startswith('Var:'):
                 continue
