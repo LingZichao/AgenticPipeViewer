@@ -5,21 +5,18 @@
 import re
 
 
-def resolve_signal_path(signal: str, task_scope: str, global_scope: str) -> str:
+def resolve_signal_path(signal: str, scope: str) -> str:
     """Resolve signal path with scope support
 
     Args:
         signal: Signal name to resolve
-        task_scope: Task-specific scope
-        global_scope: Global scope
+        scope: Resolved scope for this task
 
     Returns:
         Resolved signal path
     """
     if not isinstance(signal, str):
         return signal
-
-    scope = task_scope if task_scope else global_scope
 
     if signal.startswith("$mod."):
         if not scope:

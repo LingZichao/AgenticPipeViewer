@@ -31,13 +31,14 @@ class Task:
     ) -> "Task":
         """Create Task from dictionary with all preprocessing"""
         task_scope = data.get("scope", "")
+        # Calculate final scope: task scope overrides global scope
+        final_scope = task_scope if task_scope else global_scope
+
         raw_capture = data.get("capture", [])
         raw_condition = data.get("condition", "")
 
         # Resolve capture signals to final form
-        capture = yaml_builder.resolve_capture_signals(
-            raw_capture, task_scope, global_scope
-        )
+        capture = yaml_builder.resolve_capture_signals(raw_capture, final_scope)
 
         # Analyze condition and capture
         has_dep = "$dep." in raw_condition
@@ -54,7 +55,7 @@ class Task:
             has_dep_in_condition=has_dep,
             has_pattern_in_capture=has_pattern,
             name=data.get("name"),
-            scope=task_scope,
+            scope=final_scope,
             deps=data.get("dependsOn", []),
             logging=data.get("logging"),
         )
@@ -195,36 +196,33 @@ class YamlBuilder:
 
         for task in tasks:
             if isinstance(task, Task):
-                task_scope = task.scope or ""
+                # Task already has resolved scope
                 for sig in task.capture:
                     if isinstance(sig, str):
                         all_signals.add(sig)
                 if task.raw_condition:
                     self._collect_signals_from_condition(
-                        task.raw_condition, task_scope, global_scope, all_signals
+                        task.raw_condition, task.scope or "", all_signals
                     )
             else:
                 # Fallback for dict (during load_config phase)
                 task_scope = task.get("scope", "")
+                final_scope = task_scope if task_scope else global_scope
                 for sig in task.get("capture", []):
                     if isinstance(sig, str):
-                        resolved = self._resolve_signal_path(
-                            sig, task_scope, global_scope
-                        )
+                        resolved = self._resolve_signal_path(sig, final_scope)
                         all_signals.add(resolved)
                 raw_condition = task.get("condition")
                 if raw_condition:
                     self._collect_signals_from_condition(
-                        raw_condition, task_scope, global_scope, all_signals
+                        raw_condition, final_scope, all_signals
                     )
 
         return list(all_signals)
 
-    def _resolve_signal_path(
-        self, signal: str, task_scope: str, global_scope: str
-    ) -> str:
+    def _resolve_signal_path(self, signal: str, scope: str) -> str:
         """Resolve signal path with scope support (delegates to utils)"""
-        return resolve_signal_path(signal, task_scope, global_scope)
+        return resolve_signal_path(signal, scope)
 
     def _normalize_condition(self, condition: Union[str, list[str]]) -> str:
         """Normalize condition to single Python expression string"""
@@ -237,8 +235,7 @@ class YamlBuilder:
     def _collect_signals_from_condition(
         self,
         condition: Union[str, list[str]],
-        task_scope: str,
-        global_scope: str,
+        scope: str,
         signals: set[str],
     ) -> None:
         """Extract signal identifiers from Python expression using AST"""
@@ -255,9 +252,7 @@ class YamlBuilder:
                     token = node.id
                     if token not in ["True", "False", "None"]:
                         try:
-                            resolved = self._resolve_signal_path(
-                                token, task_scope, global_scope
-                            )
+                            resolved = self._resolve_signal_path(token, scope)
                             signals.add(resolved)
                         except (ValueError, RuntimeError):
                             pass
@@ -266,9 +261,7 @@ class YamlBuilder:
             for token in re.findall(r"\b[a-zA-Z_]\w*\b", condition_str):
                 if token not in ["and", "or", "not", "True", "False", "None"]:
                     try:
-                        resolved = self._resolve_signal_path(
-                            token, task_scope, global_scope
-                        )
+                        resolved = self._resolve_signal_path(token, scope)
                         signals.add(resolved)
                     except (ValueError, RuntimeError):
                         pass
@@ -562,14 +555,13 @@ class YamlBuilder:
             return f"[LOG ERROR] Failed to format log: {e}"
 
     def resolve_capture_signals(
-        self, capture_signals: List[Any], task_scope: str, global_scope: str
+        self, capture_signals: List[Any], scope: str
     ) -> list[str]:
         """Resolve capture signal paths with scope support
 
         Args:
             capture_signals: List of signal names to capture
-            task_scope: Task-specific scope
-            global_scope: Global scope
+            scope: Resolved scope for this task
 
         Returns:
             List of resolved signal paths
@@ -582,9 +574,7 @@ class YamlBuilder:
                     # Will be resolved per-row during matching
                     resolved_signals.append(sig)
                 else:
-                    resolved_sig = self._resolve_signal_path(
-                        sig, task_scope, global_scope
-                    )
+                    resolved_sig = self._resolve_signal_path(sig, scope)
                     resolved_signals.append(resolved_sig)
             else:
                 resolved_signals.append(str(sig))

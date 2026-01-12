@@ -122,9 +122,9 @@ class FsdbBuilder:
             if not self.verbose and os.path.exists(tmp_file):
                 os.unlink(tmp_file)
 
-    def find_matching_signals(self, pattern: str, task_scope: str, global_scope: str) -> List[tuple[str, Dict[str, str]]]:
+    def find_matching_signals(self, pattern: str, scope: str) -> List[tuple[str, Dict[str, str]]]:
         """Find signals matching a pattern with {variable} placeholders"""
-        pattern = resolve_signal_path(pattern, task_scope, global_scope)
+        pattern = resolve_signal_path(pattern, scope)
         var_pattern = re.findall(r"\{(\w+)\}", pattern)
         if not var_pattern:
             return [(pattern, {})]

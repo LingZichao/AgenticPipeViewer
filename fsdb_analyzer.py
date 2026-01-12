@@ -43,7 +43,7 @@ class FsdbAnalyzer:
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder = ConditionBuilder()
 
-    def _expand_templates(self, templates: list[str], vars: dict[str, str], task_scope: str) -> list[str]:
+    def _expand_templates(self, templates: list[str], vars: dict[str, str], scope: str) -> list[str]:
         """Expand signal templates with resolved variables"""
         signals = []
         for tmpl in templates:
@@ -51,7 +51,7 @@ class FsdbAnalyzer:
                 sig = tmpl
                 for var_name, var_val in vars.items():
                     sig = sig.replace(f"{{{var_name}}}", var_val)
-                sig = resolve_signal_path(sig, task_scope, self.global_scope)
+                sig = resolve_signal_path(sig, scope)
                 signals.append(sig)
             else:
                 signals.append(tmpl)
@@ -244,9 +244,7 @@ class FsdbAnalyzer:
         # Build all conditions after signals are dumped
         for task in tasks:
             if task.condition is None:
-                task.condition = self.cond_builder.build(
-                    task, self.global_scope, self.fsdb_builder
-                )
+                task.condition = self.cond_builder.build(task, self.fsdb_builder)
 
         print(f"\n{'=' * 70}")
         print(f"[INFO] FSDB Analyzer - Collected {len(tasks)} task(s)")

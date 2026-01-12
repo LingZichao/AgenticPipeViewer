@@ -45,11 +45,8 @@ class SignalGroup:
 class ExpressionEvaluator(ast.NodeVisitor):
     """AST-based expression evaluator with custom operator support"""
 
-    def __init__(
-        self, task_scope: str, global_scope: str, runtime_data: dict[str, Any]
-    ):
-        self.task_scope = task_scope
-        self.global_scope = global_scope
+    def __init__(self, scope: str, runtime_data: dict[str, Any]):
+        self.scope = scope
         self.signal_values = runtime_data.get("signal_values", {})
         self.upstream_row  = runtime_data.get("upstream_row", {})
         self.upstream_data = runtime_data.get("upstream_data", {})
@@ -177,7 +174,7 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     )
             raise ValueError(f"Signal '{signal_name}' not found in upstream")
 
-        signal = resolve_signal_path(name, self.task_scope, self.global_scope)
+        signal = resolve_signal_path(name, self.scope)
         val_str = self.signal_values.get(signal, "0")
         if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
             return 0
@@ -185,7 +182,7 @@ class ExpressionEvaluator(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> Any:
         signal_name = self._get_name(node.value)
-        signal = resolve_signal_path(signal_name, self.task_scope, self.global_scope)
+        signal = resolve_signal_path(signal_name, self.scope)
         val_str = self.signal_values.get(signal, "0")
         val_int = (
             0
@@ -214,11 +211,9 @@ class ExpressionEvaluator(ast.NodeVisitor):
 class ConditionBuilder:
     """Build and execute conditions with runtime data"""
 
-    def build(
-        self, task: "Task", global_scope: str, fsdb_builder: "FsdbBuilder"
-    ) -> Condition:
+    def build(self, task: "Task", fsdb_builder: "FsdbBuilder") -> Condition:
         """Build a condition from task"""
-        task_scope = task.scope or ""
+        scope = task.scope or ""
         condition_str = task.raw_condition
         has_pattern = "{" in condition_str and "}" in condition_str
 
@@ -233,17 +228,10 @@ class ConditionBuilder:
                 )
             var_name = list(var_names)[0]
             evaluator = self._build_pattern_evaluator(
-                patterns,
-                var_name,
-                condition_str,
-                task_scope,
-                global_scope,
-                fsdb_builder,
+                patterns, var_name, condition_str, scope, fsdb_builder
             )
         else:
-            evaluator = self._build_simple_evaluator(
-                condition_str, task_scope, global_scope
-            )
+            evaluator = self._build_simple_evaluator(condition_str, scope)
 
         return Condition(expr=condition_str, evaluator=evaluator)
 
@@ -252,8 +240,7 @@ class ConditionBuilder:
         patterns: list[str],
         var_name: str,
         condition_str: str,
-        task_scope: str,
-        global_scope: str,
+        scope: str,
         fsdb_builder: "FsdbBuilder",
     ) -> Callable[[dict[str, Any]], bool]:
         """Build evaluator for pattern conditions"""
@@ -261,9 +248,7 @@ class ConditionBuilder:
         def evaluator(runtime_data: dict[str, Any]) -> bool:
             possible_vals = set()
             for pattern in patterns:
-                for _, captured in fsdb_builder.find_matching_signals(
-                    pattern, task_scope, global_scope
-                ):
+                for _, captured in fsdb_builder.find_matching_signals(pattern, scope):
                     if var_name in captured:
                         possible_vals.add(captured[var_name])
 
@@ -276,9 +261,7 @@ class ConditionBuilder:
                         pattern, pattern.replace(f"{{{var_name}}}", val)
                     )
                 try:
-                    expr_eval = ExpressionEvaluator(
-                        task_scope, global_scope, runtime_data
-                    )
+                    expr_eval = ExpressionEvaluator(scope, runtime_data)
                     return bool(expr_eval.eval(test_cond))
                 except (ValueError, RuntimeError, KeyError):
                     return False
@@ -299,12 +282,12 @@ class ConditionBuilder:
         return evaluator
 
     def _build_simple_evaluator(
-        self, condition_str: str, task_scope: str, global_scope: str
+        self, condition_str: str, scope: str
     ) -> Callable[[dict[str, Any]], bool]:
         """Build evaluator for simple conditions"""
 
         def evaluator(runtime_data: dict[str, Any]) -> bool:
-            expr_eval = ExpressionEvaluator(task_scope, global_scope, runtime_data)
+            expr_eval = ExpressionEvaluator(scope, runtime_data)
             return bool(expr_eval.eval(condition_str))
 
         return evaluator
