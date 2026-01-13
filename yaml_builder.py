@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import yaml
-import ast
 import re
 from pathlib import Path
 from typing import Union, Any, List, Optional
@@ -193,23 +192,25 @@ class YamlBuilder:
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
 
+        from condition_builder import ConditionBuilder
+
         all_signals: set[str] = set()
         tasks: List[Union[dict[str, Any], Task]] = self.config.get("tasks", [])
 
         for task in tasks:
             if isinstance(task, Task):
-                # Task already has resolved scope
+                # Collect capture signals
                 for sig in task.capture:
                     if isinstance(sig, str):
-                        # Replace {var} patterns with {*}
-                        # Note: Bit ranges like [31:0] are preserved as-is
-                        # They are NOT part of signal name, but part of condition expression
                         normalized_sig = re.sub(r'\{[^}]+\}', '{*}', sig)
                         all_signals.add(normalized_sig)
+
+                # Collect condition signals using ConditionBuilder
                 if task.raw_condition:
-                    self._collect_signals_from_condition(
-                        task.raw_condition, task.scope or "", all_signals
-                    )
+                    condition_str = task.raw_condition.replace("&&", " and ").replace("||", " or ")
+                    condition_str = re.sub(r'\s+', ' ', condition_str).strip()
+                    cond_signals = ConditionBuilder.collect_signals(condition_str, task.scope or "")
+                    all_signals.update(cond_signals)
             else:
                 raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
 
@@ -226,55 +227,6 @@ class YamlBuilder:
         elif isinstance(condition, list):
             return " ".join(line.strip() for line in condition if line.strip())
         return str(condition)
-
-    def _collect_signals_from_condition(
-        self,
-        condition: Union[str, list[str]],
-        scope: str,
-        signals: set[str],
-    ) -> None:
-        """Extract signal identifiers from Python expression using AST"""
-        condition_str = self._normalize_condition(condition)
-
-        # Extract pattern signals like signal{var} before normalization
-        # Note: This regex intentionally does NOT capture bit range [msb:lsb]
-        # Bit ranges are part of the condition expression, not the signal name
-        # Example: "sig{idx}[31:0]" -> extracts "sig{idx}", leaves "[31:0]" in condition
-        pattern_signals = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", condition_str)
-        for pattern in pattern_signals:
-            # Replace {var} with {*} and resolve with scope
-            normalized_pattern = re.sub(r'\{[^}]+\}', '{*}', pattern)
-            resolved = self._resolve_signal_path(normalized_pattern, scope)
-            signals.add(resolved)
-
-        # Remove $dep references, $split() calls, and Verilog literals before parsing
-        condition_str = re.sub(r"\$dep\.\w+\.\w+", "0", condition_str)
-        condition_str = re.sub(r"\.\$split\([^)]+\)", "", condition_str)  # Remove .$split(n)
-        condition_str = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", "0", condition_str)
-        # Remove pattern signals to avoid parsing them as regular signals
-        for pattern in pattern_signals:
-            condition_str = condition_str.replace(pattern, "0")
-
-        try:
-            tree = ast.parse(condition_str, mode="eval")
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Name):
-                    token = node.id
-                    if token not in ["True", "False", "None"]:
-                        try:
-                            resolved = self._resolve_signal_path(token, scope)
-                            signals.add(resolved)
-                        except (ValueError, RuntimeError):
-                            pass
-        except SyntaxError:
-            # Fallback: extract identifiers using regex
-            for token in re.findall(r"\b[a-zA-Z_]\w*\b", condition_str):
-                if token not in ["and", "or", "not", "True", "False", "None"]:
-                    try:
-                        resolved = self._resolve_signal_path(token, scope)
-                        signals.add(resolved)
-                    except (ValueError, RuntimeError):
-                        pass
 
     def _validate_task(self, task: dict[str, Any], task_num: int) -> None:
         """Validate task configuration"""

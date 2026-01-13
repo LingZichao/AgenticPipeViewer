@@ -3,6 +3,40 @@
 
 
 import re
+from dataclasses import dataclass
+from typing import List, Union, Sequence
+
+
+@dataclass
+class SignalGroup:
+    """Represents a group of signal values or pattern variable captures
+
+    Used for:
+    - Signal values from $split() operations (values are ints)
+    - Pattern variable captures like {idx} (values are strings)
+    """
+    values: List[Union[int, str]]
+
+    def __init__(self, values: Sequence[Union[int, str]]):
+        """Initialize with sequence that can be List[int], List[str], or List[int|str]"""
+        self.values = list(values)
+
+    def contains(self, value: Union[int, str]) -> bool:
+        """Check if value is in this group"""
+        return value in self.values
+
+    def filter(self, predicate) -> "SignalGroup":
+        """Filter values by predicate"""
+        return SignalGroup(values=[v for v in self.values if predicate(v)])
+
+    def unique(self) -> Union[int, str]:
+        """Get unique value, raise if not exactly one"""
+        if len(self.values) == 1:
+            return self.values[0]
+        elif len(self.values) == 0:
+            raise ValueError("SignalGroup is empty")
+        else:
+            raise ValueError(f"SignalGroup has multiple values: {self.values}")
 
 
 def resolve_signal_path(signal: str, scope: str) -> str:

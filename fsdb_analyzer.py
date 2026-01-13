@@ -44,8 +44,10 @@ class FsdbAnalyzer:
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder = ConditionBuilder()
 
-    def _expand_templates(self, templates: list[str], vars: dict[str, str], scope: str) -> list[str]:
-        """Expand signal templates with resolved variables"""
+    def _expand_templates(
+        self, templates: list[str], vars: dict[str, str], scope: str
+    ) -> list[str]:
+        """Expand signal templates with resolved variables after condition evaluation"""
         signals = []
         for tmpl in templates:
             if isinstance(tmpl, str) and "{" in tmpl:
@@ -63,14 +65,13 @@ class FsdbAnalyzer:
         templates = task.capture
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
-        cond = task.condition
-
-        # Collect all signals needed (from both capture and condition)
+        # # Collect all signals needed (from both capture and condition)
         all_needed_signals = set(templates)
-        # Get signals from condition by parsing the condition expression
-        # This is a simplified approach - we collect all signals that were resolved during config
+        # # Get signals from condition by parsing the condition expression
+        # # This is a simplified approach - we collect all signals that were resolved during config
         for sig in self.yaml_builder.collect_raw_signals(self.global_scope):
             all_needed_signals.add(sig)
+            print(f"[DEBUG] Added signal from condition: {sig}")
 
         signal_data = {}
         for sig in all_needed_signals:
@@ -81,7 +82,6 @@ class FsdbAnalyzer:
                     pass
 
         max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
-        log_format = task.logging
 
         # Evaluate condition for each row
         matched_rows = []
@@ -94,11 +94,11 @@ class FsdbAnalyzer:
 
                 runtime_data = {
                     "signal_values": signal_values,
-                    "upstream_row": {},
+                    "upstream_row" : {},
                     "upstream_data": {},
                     "vars": {},
                 }
-                if self.cond_builder.exec(cond, runtime_data):
+                if self.cond_builder.exec(task.condition, runtime_data):
                     vars = runtime_data.get("vars", {})
                     signals = self._expand_templates(templates, vars, task.scope or "")
 
@@ -120,9 +120,9 @@ class FsdbAnalyzer:
 
                     matched_rows.append(row_data)
 
-                    if log_format:
+                    if task.logging:
                         log_msg = self.yaml_builder.format_log(
-                            log_format, row_data, signals, row_idx
+                            task.logging, row_data, signals, row_idx
                         )
                         print(f"  [LOG] {log_msg}")
             except Exception as e:
@@ -161,8 +161,9 @@ class FsdbAnalyzer:
         # From capture
         for sig in templates:
             if "{" in sig:
-                matches = self.fsdb_builder.find_matching_signals(sig, task.scope or "")
-                actual_signals = [match[0] for match in matches]
+                # Convert {variable} to {*} for expansion
+                wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', sig)
+                actual_signals = self.fsdb_builder.expand_raw_signals([wildcard_pattern])
                 pattern_mappings[sig] = actual_signals
                 all_signal_names.update(actual_signals)
             else:
@@ -171,10 +172,10 @@ class FsdbAnalyzer:
         # From condition - extract pattern signals
         if task.raw_condition and "{" in task.raw_condition:
             patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", task.raw_condition)
-            for pattern in patterns:
-                matches = self.fsdb_builder.find_matching_signals(pattern, task.scope or "")
-                for match_sig, _ in matches:
-                    all_signal_names.add(match_sig)
+            # Convert {variable} to {*} for expansion
+            wildcard_patterns = [re.sub(r'\{[^}]+\}', '{*}', p) for p in patterns]
+            expanded = self.fsdb_builder.expand_raw_signals(wildcard_patterns)
+            all_signal_names.update(expanded)
 
         # Load all signals
         signal_data = {}
@@ -258,7 +259,6 @@ class FsdbAnalyzer:
         }
 
         print(f"Matched {len(matched_rows)} rows")
-
         print(f"Result: {len(matched_rows)} rows in memory\n")
         return f"[Memory] {len(matched_rows)} rows"
 
@@ -276,7 +276,7 @@ class FsdbAnalyzer:
         self.fsdb_builder.dump_signals(soi)
 
         input()
-        # Build all conditions after signals are dumped
+        # Build all conditions after signals are dumped, TODO
         for task in tasks:
             if task.condition is None:
                 task.condition = self.cond_builder.build(task, self.fsdb_builder)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import re
 import ast
-from typing import Any, Callable, List, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass
-from utils import resolve_signal_path, verilog_to_int, split_signal
+from utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
 
 if TYPE_CHECKING:
     from yaml_builder import Task
@@ -14,32 +14,12 @@ if TYPE_CHECKING:
 class Condition:
     """Compiled condition that can be executed with runtime data"""
 
-    expr: str
-    evaluator: Callable[[dict[str, Any]], bool]
-
-
-@dataclass
-class SignalGroup:
-    """Represents a group of signal values with operations"""
-
-    values: List[int]
-
-    def contains(self, value: int) -> bool:
-        """Check if value is in this group"""
-        return value in self.values
-
-    def filter(self, predicate) -> "SignalGroup":
-        """Filter values by predicate"""
-        return SignalGroup(values=[v for v in self.values if predicate(v)])
-
-    def unique(self) -> int:
-        """Get unique value, raise if not exactly one"""
-        if len(self.values) == 1:
-            return self.values[0]
-        elif len(self.values) == 0:
-            raise ValueError("SignalGroup is empty")
-        else:
-            raise ValueError(f"SignalGroup has multiple values: {self.values}")
+    raw_expr: str  # Original expression string
+    norm_expr: str  # Normalized expression (Python-compatible)
+    evaluator: Callable[[dict[str, Any]], bool]  # Evaluation function
+    signals: List[str]  # Signals needed (normalized names with {*})
+    has_pattern: bool  # Whether contains pattern matching {var}
+    pattern_var: str = ""  # Pattern variable name if has_pattern
 
 
 class ExpressionEvaluator(ast.NodeVisitor):
@@ -48,7 +28,7 @@ class ExpressionEvaluator(ast.NodeVisitor):
     def __init__(self, scope: str, runtime_data: dict[str, Any]):
         self.scope = scope
         self.signal_values = runtime_data.get("signal_values", {})
-        self.upstream_row  = runtime_data.get("upstream_row", {})
+        self.upstream_row = runtime_data.get("upstream_row", {})
         self.upstream_data = runtime_data.get("upstream_data", {})
 
     def eval(self, expr: str) -> Any:
@@ -113,9 +93,15 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 # Handle <@ operator (converted to 'in')
                 if isinstance(right, SignalGroup):
                     if not isinstance(left, int):
-                        raise ValueError(f"Left operand of <@ must be int, got {type(left)}")
+                        raise ValueError(
+                            f"Left operand of <@ must be int, got {type(left)}"
+                        )
                     result = right.contains(left)
-                    print(f"[DEBUG] {hex(left)} <@ {[hex(v) for v in right.values]} = {result}")
+                    # For signal groups from $split, values are always int
+                    int_values = [v for v in right.values if isinstance(v, int)]
+                    print(
+                        f"[DEBUG] {hex(left)} <@ {[hex(v) for v in int_values]} = {result}"
+                    )
                     if not result:
                         return False
                 else:
@@ -142,13 +128,17 @@ class ExpressionEvaluator(ast.NodeVisitor):
         """Handle function calls, including custom operators like _split() and _contains()"""
         if isinstance(node.func, ast.Name):
             if node.func.id == "_split":
-                # _split(signal, num_parts) -> SignalGroup
+                # _split(signal, num_parts) -> SignalGroup[int]
                 if len(node.args) != 2:
                     raise ValueError("_split() requires exactly 2 arguments")
                 signal_val = self.visit(node.args[0])
                 num_parts = self.visit(node.args[1])
-                result = SignalGroup(values=split_signal(hex(signal_val), num_parts))
-                print(f"[DEBUG] $split({hex(signal_val)}, {num_parts}) = {[hex(v) for v in result.values]}")
+                # split_signal returns List[int], so this is type-safe
+                int_values: List[int] = split_signal(hex(signal_val), num_parts)
+                result = SignalGroup(values=int_values)
+                print(
+                    f"[DEBUG] $split({hex(signal_val)}, {num_parts}) = {[hex(v) for v in int_values]}"
+                )
                 return result
             elif node.func.id == "_contains":
                 # _contains(value, group) -> bool
@@ -159,7 +149,9 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 # Right side should be a SignalGroup
                 if isinstance(right_val, SignalGroup):
                     result = right_val.contains(left_val)
-                    print(f"[DEBUG] {hex(left_val)} <@ {[hex(v) for v in right_val.values]} = {result}")
+                    print(
+                        f"[DEBUG] {hex(left_val)} <@ {[hex(v) for v in right_val.values]} = {result}"
+                    )
                     return result
                 # If not a group, treat as single value comparison
                 return left_val == right_val
@@ -218,110 +210,278 @@ class ExpressionEvaluator(ast.NodeVisitor):
         raise ValueError(f"Cannot extract name from {node}")
 
 
+class ConditionParser:
+    """Unified condition expression parser with preprocessing and signal collection"""
+
+    def __init__(self, scope: str):
+        self.scope = scope
+        self.signals: set[str] = set()
+        self.has_pattern = False
+        self.pattern_var = ""
+        self.pattern_signals: List[str] = []
+
+    def parse(self, expr: str) -> tuple[str, List[str], bool, str]:
+        """
+        Parse and preprocess expression, collecting all metadata.
+
+        Returns: (normalized_expr, signals, has_pattern, pattern_var)
+        """
+        # Step 1: Extract pattern signals (before normalization)
+        self._extract_patterns(expr)
+
+        # Step 2: Normalize syntax to Python-compatible form
+        normalized = self._normalize_syntax(expr)
+
+        # Step 3: Parse AST and collect signals
+        self._collect_signals_from_ast(normalized)
+
+        return normalized, list(self.signals), self.has_pattern, self.pattern_var
+
+    def _extract_patterns(self, expr: str) -> None:
+        """Extract and resolve pattern signals like signal{var}"""
+        patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", expr)
+
+        if patterns:
+            self.has_pattern = True
+            self.pattern_signals = patterns
+
+            # Extract variable name(s)
+            var_names = set()
+            for pattern in patterns:
+                var_names.update(re.findall(r"\{(\w+)\}", pattern))
+
+            if len(var_names) == 1:
+                self.pattern_var = list(var_names)[0]
+            elif len(var_names) > 1:
+                raise ValueError(
+                    f"Multiple pattern variables not supported: {var_names}"
+                )
+
+            # Add pattern signals with {*} wildcard
+            for pattern in patterns:
+                normalized_pattern = re.sub(r"\{[^}]+\}", "{*}", pattern)
+                resolved = resolve_signal_path(normalized_pattern, self.scope)
+                self.signals.add(resolved)
+
+    def _normalize_syntax(self, expr: str) -> str:
+        """Normalize custom syntax to Python-compatible AST"""
+        # Convert logical operators
+        normalized = expr.replace("&&", " and ").replace("||", " or ")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        # Remove Verilog literals (replace with 0 for AST parsing)
+        normalized = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", "0", normalized)
+
+        # Normalize $dep references to _dep_ format
+        for match in re.finditer(r"\$dep\.(\w+)\.(\w+)", normalized):
+            normalized = normalized.replace(
+                match.group(0), f"_dep_{match.group(1)}_{match.group(2)}"
+            )
+
+        # Transform $split() to _split() function call
+        normalized = re.sub(
+            r"([\w_]+(?:\[\d+:\d+\])?)\.\$split\(", r"_split(\1, ", normalized
+        )
+
+        # Transform <@ to 'in' operator
+        normalized = normalized.replace("<@", " in ")
+
+        # Remove pattern signals from normalized expression (for AST parsing)
+        for pattern in self.pattern_signals:
+            normalized = re.sub(re.escape(pattern), "0", normalized)
+
+        return normalized
+
+    def _collect_signals_from_ast(self, expr: str) -> None:
+        """Collect signals by walking the AST"""
+        try:
+            tree = ast.parse(expr, mode="eval")
+            self._visit_ast(tree.body)
+        except SyntaxError:
+            # Invalid syntax, will be caught during evaluation
+            pass
+
+    def _visit_ast(self, node: ast.AST) -> None:
+        """Recursively visit AST nodes to collect signals"""
+        if isinstance(node, ast.Name):
+            self._collect_name(node)
+        elif isinstance(node, ast.Subscript):
+            self._collect_subscript(node)
+        elif isinstance(node, ast.Call):
+            self._collect_call(node)
+
+        # Recursively visit children
+        for child in ast.iter_child_nodes(node):
+            self._visit_ast(child)
+
+    def _collect_name(self, node: ast.Name) -> None:
+        """Collect signal from Name node"""
+        name = node.id
+        # Skip Python keywords and internal names (starting with _)
+        if name not in ["True", "False", "None"] and not name.startswith("_"):
+            try:
+                resolved = resolve_signal_path(name, self.scope)
+                self.signals.add(resolved)
+            except (ValueError, RuntimeError):
+                pass
+
+    def _collect_subscript(self, node: ast.Subscript) -> None:
+        """Collect signal from Subscript node (e.g., signal[31:0])"""
+        signal_name = self._get_name(node.value)
+        if signal_name and not signal_name.startswith("_"):
+            try:
+                resolved = resolve_signal_path(signal_name, self.scope)
+                self.signals.add(resolved)
+            except (ValueError, RuntimeError):
+                pass
+
+    def _collect_call(self, node: ast.Call) -> None:
+        """Handle function calls like _split(signal, n)"""
+        if isinstance(node.func, ast.Name) and node.func.id == "_split":
+            # For _split(signal, n), collect the signal argument
+            if len(node.args) >= 1:
+                self._visit_ast(node.args[0])
+
+    def _get_name(self, node: ast.AST) -> str:
+        """Extract signal name from AST node"""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            return f"{self._get_name(node.value)}.{node.attr}"
+        return ""
+
+
 class ConditionBuilder:
     """Build and execute conditions with runtime data"""
+
+    @staticmethod
+    def collect_signals(condition_str: str, scope: str) -> List[str]:
+        """Extract signal identifiers from condition expression (static method)"""
+        parser = ConditionParser(scope)
+        _, signals, _, _ = parser.parse(condition_str)
+        return signals
 
     def build(self, task: "Task", fsdb_builder: "FsdbBuilder") -> Condition:
         """Build a condition from task"""
         scope = task.scope or ""
-        # Convert && to and, || to or
-        condition_str = task.raw_condition.replace("&&", " and ").replace("||", " or ")
-        # Normalize whitespace: collapse multiple spaces to single space
-        condition_str = re.sub(r'\s+', ' ', condition_str).strip()
-        has_pattern = "{" in condition_str and "}" in condition_str
+        raw_expr = task.raw_condition
 
+        # Parse and preprocess expression using unified parser
+        parser = ConditionParser(scope)
+        norm_expr, signals, has_pattern, pattern_var = parser.parse(raw_expr)
+
+        # Pre-compute pattern candidates if needed
+        pattern_candidates = None
         if has_pattern:
-            # Pattern should only match signal name, not bit selection [31:0]
-            patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", condition_str)
-            var_names = set()
-            for p in patterns:
-                var_names.update(re.findall(r"\{(\w+)\}", p))
-            if len(var_names) != 1:
-                raise ValueError(
-                    f"Currently only one variable supported, found: {var_names}"
-                )
-            var_name = list(var_names)[0]
-            evaluator = self._build_pattern_evaluator(
-                patterns, var_name, condition_str, scope, fsdb_builder
+            pattern_candidates = self._compute_pattern_candidates(
+                parser.pattern_signals, pattern_var, scope, fsdb_builder
             )
-        else:
-            evaluator = self._build_simple_evaluator(condition_str, scope)
 
-        return Condition(expr=condition_str, evaluator=evaluator)
+        # Build unified evaluator
+        evaluator = self._build_evaluator(
+            scope,
+            raw_expr,
+            has_pattern,
+            pattern_var,
+            parser.pattern_signals if has_pattern else None,
+            pattern_candidates,
+        )
 
-    def _build_pattern_evaluator(
+        return Condition(
+            raw_expr=raw_expr,
+            norm_expr=norm_expr,
+            evaluator=evaluator,
+            signals=signals,
+            has_pattern=has_pattern,
+            pattern_var=pattern_var,
+        )
+
+    def _compute_pattern_candidates(
         self,
         patterns: list[str],
         var_name: str,
-        condition_str: str,
         scope: str,
         fsdb_builder: "FsdbBuilder",
-    ) -> Callable[[dict[str, Any]], bool]:
-        """Build evaluator for pattern conditions"""
+    ) -> SignalGroup:
+        """Pre-compute all possible pattern variable values from FSDB
 
-        # Pre-compute all possible values at build time and print debug info
+        Uses expand_raw_signals() to get signal names, then extracts variable values
+        using regex pattern matching.
+        """
         possible_vals = set()
-        # print(f"[DEBUG] Building pattern evaluator for variable '{var_name}'")
-        for pattern in patterns:
-            matches = fsdb_builder.find_matching_signals(pattern, scope)
-            # print(f"[DEBUG] Pattern '{pattern}' matched {len(matches)} signals:")
-            for sig, captured in matches:
-                # if len(matches) <= 10:  # Only print details if not too many
-                #     print(f"  - {sig} (captured: {captured})")
-                if var_name in captured:
-                    possible_vals.add(captured[var_name])
-            # if len(matches) > 10:
-            #     print(f"  (showing first 10 of {len(matches)} matches)")
-            #     for sig, captured in list(matches)[:10]:
-            #         print(f"  - {sig} (captured: {captured})")
 
-        # print(f"[DEBUG] Possible values for '{var_name}': {sorted(possible_vals)}")
-        candidates = SignalGroup(values=list(possible_vals))
+        for pattern in patterns:
+            # Step 1: Convert {variable} to {*} for expansion
+            wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', pattern)
+            expanded_signals = fsdb_builder.expand_raw_signals([wildcard_pattern])
+
+            # Step 2: Build regex to extract variable value from actual signal names
+            resolved_pattern = resolve_signal_path(pattern, scope)
+            extract_regex = re.escape(resolved_pattern).replace(
+                re.escape(f'{{{var_name}}}'), r'([a-zA-Z0-9_$]+)'
+            )
+            # Allow optional bit range at the end
+            extract_regex = f'^{extract_regex}(?:\\[\\d+:\\d+\\])?$'
+
+            # Step 3: Extract variable values from matched signals
+            for sig in expanded_signals:
+                match = re.match(extract_regex, sig)
+                if match:
+                    possible_vals.add(match.group(1))
+
+        return SignalGroup(values=list(possible_vals))
+
+    def _build_evaluator(
+        self,
+        scope: str,
+        raw_expr: str,
+        has_pattern: bool,
+        pattern_var: str,
+        patterns: Optional[List[str]] = None,
+        candidates: Optional[SignalGroup] = None,
+    ) -> Callable[[dict[str, Any]], bool]:
+        """Build unified evaluator for both simple and pattern conditions"""
+
+        if not has_pattern:
+            # Simple condition: direct evaluation
+            def evaluator(runtime_data: dict[str, Any]) -> bool:
+                expr_eval = ExpressionEvaluator(scope, runtime_data)
+                return bool(expr_eval.eval(raw_expr))
+
+            return evaluator
+
+        # Pattern condition: test each candidate value
+        # Assert patterns and candidates are not None for pattern conditions
+        assert patterns is not None, "patterns required for pattern conditions"
+        assert candidates is not None, "candidates required for pattern conditions"
 
         def evaluator(runtime_data: dict[str, Any]) -> bool:
-
             def test_value(val: str) -> bool:
-                test_cond = condition_str
+                # Substitute pattern variable with candidate value
+                test_expr = raw_expr
                 for pattern in patterns:
-                    test_cond = test_cond.replace(
-                        pattern, pattern.replace(f"{{{var_name}}}", val)
+                    test_expr = test_expr.replace(
+                        pattern, pattern.replace(f"{{{pattern_var}}}", val)
                     )
                 try:
-                    # print(f"[DEBUG] Testing {var_name}={val}: {test_cond[:100]}...")
-                    # Debug: print signal values
-                    # signal_values = runtime_data.get("signal_values", {})
-                    # print(f"[DEBUG] Available signals: {list(signal_values.keys())[:5]}...")
                     expr_eval = ExpressionEvaluator(scope, runtime_data)
-                    result = bool(expr_eval.eval(test_cond))
-                    # print(f"[DEBUG] Result for {var_name}={val}: {result}")
-                    return result
-                except (ValueError, RuntimeError, KeyError) as e:
-                    # print(f"[DEBUG] Error for {var_name}={val}: {e}")
+                    return bool(expr_eval.eval(test_expr))
+                except (ValueError, RuntimeError, KeyError):
                     return False
 
+            # Filter candidates to find matches
             matched_group = candidates.filter(test_value)
 
             try:
                 matched_val = matched_group.unique()
-                runtime_data["vars"] = {var_name: matched_val}
+                runtime_data["vars"] = {pattern_var: matched_val}
                 return True
             except ValueError:
                 if len(matched_group.values) == 0:
                     return False
                 raise ValueError(
-                    f"Ambiguous match: {matched_group.values} for '{var_name}'"
+                    f"Ambiguous match: {matched_group.values} for '{pattern_var}'"
                 )
-
-        return evaluator
-
-    def _build_simple_evaluator(
-        self, condition_str: str, scope: str
-    ) -> Callable[[dict[str, Any]], bool]:
-        """Build evaluator for simple conditions"""
-
-        def evaluator(runtime_data: dict[str, Any]) -> bool:
-            expr_eval = ExpressionEvaluator(scope, runtime_data)
-            return bool(expr_eval.eval(condition_str))
 
         return evaluator
 
@@ -330,4 +490,6 @@ class ConditionBuilder:
         try:
             return condition.evaluator(runtime_data)
         except Exception as e:
-            raise ValueError(f"Failed to evaluate condition '{condition.expr}': {e}")
+            raise ValueError(
+                f"[ERROR] Failed to evaluate condition '{condition.raw_expr}': {e}"
+            )
