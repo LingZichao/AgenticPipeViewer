@@ -132,6 +132,11 @@ class YamlBuilder:
         config["output"].setdefault("directory", "temp_reports")
         config["output"].setdefault("verbose", False)
         config["output"].setdefault("dependency_graph", "deps.png")
+        config["output"].setdefault("timeout", 100)  # Default 100 time units
+
+        # Validate timeout
+        if not isinstance(config["output"]["timeout"], int) or config["output"]["timeout"] <= 0:
+            raise ValueError("[ERROR] output.timeout must be a positive integer")
 
         self.output_dir = Path(config["output"]["directory"])
         try:

@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import List, Dict
-from utils import resolve_signal_path
+from utils import resolve_signal_path, normalize_signal_name
 
 
 class FsdbBuilder:
@@ -18,6 +18,7 @@ class FsdbBuilder:
         self.signal_widths: Dict[str, tuple[int, int]] = {}
         self.all_signals_list: List[str] = []
         self.signal_name_map: Dict[str, str] = {}  # Normalized name -> FSDB name with bitwidth
+        self.timestamps: List[int] = []  # FSDB timestamps in 100fs units
 
     def to_fsdb_path(self, signal: str) -> str:
         """Convert signal path from dot notation to FSDB format (slash)"""
@@ -132,7 +133,7 @@ class FsdbBuilder:
 
         # Build mapping: normalized name (without bitwidth) -> FSDB name (with bitwidth)
         for sig in matched_signals:
-            normalized = re.sub(r'\[\d+:\d+\]$', '', sig)  # Remove trailing [msb:lsb]
+            normalized = normalize_signal_name(sig)
             self.signal_name_map[normalized] = sig
 
         fsdb_paths = [self.to_fsdb_path(sig) for sig in matched_signals]
@@ -167,8 +168,10 @@ class FsdbBuilder:
 
             # Initialize cache for original signal names (without bit ranges)
             for sig in matched_signals:
-                normalized = re.sub(r'\[\d+:\d+\]$', '', sig)
+                normalized = normalize_signal_name(sig)
                 self.signal_cache[normalized] = []
+
+            self.timestamps = []  # Reset timestamps
 
             data_start = header_idx + 2
 
@@ -179,9 +182,17 @@ class FsdbBuilder:
                 if len(parts) < 2:
                     continue
 
+                # Store timestamp from first column
+                try:
+                    timestamp = int(parts[0])
+                    self.timestamps.append(timestamp)
+                except ValueError:
+                    continue
+
+                # Store signal values (parts[1:])
                 for idx, val in enumerate(parts[1:]):
                     if idx < len(matched_signals):
-                        normalized = re.sub(r'\[\d+:\d+\]$', '', matched_signals[idx])
+                        normalized = normalize_signal_name(matched_signals[idx])
                         self.signal_cache[normalized].append(val)
 
         finally:

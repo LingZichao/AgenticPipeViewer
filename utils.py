@@ -84,6 +84,24 @@ def split_signal(signal_val: str, num_parts: int) -> list[int]:
     mask = (1 << bits_per_part) - 1
     return [(val_int >> (i * bits_per_part)) & mask for i in range(num_parts)]
 
+def normalize_signal_name(signal: str) -> str:
+    """Remove bit range from signal name for cache lookup
+
+    Args:
+        signal: Signal name that may include bit range (e.g., "sig[127:0]")
+
+    Returns:
+        Normalized signal name without bit range (e.g., "sig")
+
+    Examples:
+        >>> normalize_signal_name("biu_ifu_rd_data[127:0]")
+        'biu_ifu_rd_data'
+        >>> normalize_signal_name("biu_ifu_rd_data")
+        'biu_ifu_rd_data'
+    """
+    return re.sub(r'\[\d+:\d+\]$', '', signal)
+
+
 def verilog_to_int(match: re.Match[str]) -> str:
     parts = match.group(0).split("'")
     base_map = {'b': 2, 'o': 8, 'd': 10, 'h': 16}

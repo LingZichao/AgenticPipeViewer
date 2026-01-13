@@ -6,7 +6,7 @@ from typing import Any
 from yaml_builder import YamlBuilder, Task
 from fsdb_builder import FsdbBuilder
 from condition_builder import ConditionBuilder
-from utils import resolve_signal_path
+from utils import resolve_signal_path, normalize_signal_name
 
 
 class FsdbAnalyzer:
@@ -29,6 +29,7 @@ class FsdbAnalyzer:
 
         # Step 2: Initialize FsdbBuilder and get signal hierarchy
         self.verbose: bool = raw_config["output"]["verbose"]
+        self.timeout: int = raw_config["output"]["timeout"]
         self.fsdb_file = Path(raw_config["fsdbFile"])
         self.output_dir = Path(raw_config["output"]["directory"])
         self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
@@ -65,27 +66,37 @@ class FsdbAnalyzer:
         templates = task.capture
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
+        cond = task.condition
+        if cond is None:
+            raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
+
         # Collect all signals needed (from condition + capture templates)
-        all_signal_names = set()
+        raw_signal_patterns = set()
 
         # Add condition signals (already normalized with {*} wildcards)
-        all_signal_names.update(task.condition.signals)
+        raw_signal_patterns.update(cond.signals)
 
         # Expand capture templates with {*} wildcards
         for tmpl in templates:
             if "{" in tmpl:
                 wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
-                all_signal_names.add(wildcard)
+                raw_signal_patterns.add(wildcard)
             else:
-                all_signal_names.add(tmpl)
+                raw_signal_patterns.add(tmpl)
+
+        # Expand {*} patterns to actual signal names
+        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
 
         # Load all signals from FSDB cache (already dumped in run())
+        # Note: Cache uses normalized names (without bit ranges)
         signal_data = {}
         for sig in all_signal_names:
+            # Normalize signal name by removing bit range
+            normalized_sig = normalize_signal_name(sig)
             try:
-                signal_data[sig] = self.fsdb_builder.get_signal(sig)
+                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
             except RuntimeError:
-                print(f"[WARN] Signal {sig} not in cache, skipping")
+                print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
 
         if not signal_data:
             print("[WARN] No signals loaded for evaluation")
@@ -95,7 +106,9 @@ class FsdbAnalyzer:
 
         # Evaluate condition for each time point
         matched_rows = []
-        for trace_id, row_idx in enumerate(range(max_len)):
+        trace_id = 0  # Track number of matches
+
+        for row_idx in range(max_len):
             try:
                 # Build signal_values for this time point
                 signal_values = {}
@@ -109,7 +122,7 @@ class FsdbAnalyzer:
                     "vars": {},
                 }
 
-                if self.cond_builder.exec(task.condition, runtime_data):
+                if self.cond_builder.exec(cond, runtime_data):
                     # Condition matched! Extract pattern variables
                     vars = runtime_data.get("vars", {})
 
@@ -119,16 +132,30 @@ class FsdbAnalyzer:
                     # Build row_data with trace_id
                     row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
                     for sig in signals:
-                        if sig in signal_data:
-                            vals = signal_data[sig]
+                        # Normalize signal name to match cache keys
+                        normalized_sig = normalize_signal_name(sig)
+                        if normalized_sig in signal_data:
+                            vals = signal_data[normalized_sig]
+                            # Use original signal name (with scope) as key in capd
                             row_data["capd"][sig] = (
                                 vals[row_idx] if row_idx < len(vals) else "0"
                             )
+                        else:
+                            # Debug: signal not found in signal_data
+                            if trace_id < 3:  # Only print for first 3 matches
+                                print(f"[DEBUG] Signal {normalized_sig} not found in signal_data at row {row_idx}")
 
                     matched_rows.append(row_data)
+                    trace_id += 1  # Increment trace_id for each match
 
                     # Log if configured
                     if task.logging:
+                        # Debug: print captured values before formatting
+                        if trace_id <= 3:
+                            print(f"[DEBUG] Captured signals at row {row_idx}:")
+                            for sig, val in row_data["capd"].items():
+                                print(f"  {sig} = {val}")
+
                         log_msg = self.yaml_builder.format_log(
                             task.logging, row_data, signals, row_idx
                         )
@@ -161,56 +188,72 @@ class FsdbAnalyzer:
             )
 
         cond = task.condition
+        if cond is None:
+            raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Collect all signals needed: from capture and from condition
-        all_signal_names = set()
-        pattern_mappings = {}
+        # Collect all signals needed (from condition + capture templates)
+        raw_signal_patterns = set()
 
-        # From capture
-        for sig in templates:
-            if "{" in sig:
-                # Convert {variable} to {*} for expansion
-                wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', sig)
-                actual_signals = self.fsdb_builder.expand_raw_signals([wildcard_pattern])
-                pattern_mappings[sig] = actual_signals
-                all_signal_names.update(actual_signals)
+        # Add condition signals (already normalized with {*} wildcards)
+        raw_signal_patterns.update(cond.signals)
+
+        # Expand capture templates with {*} wildcards
+        for tmpl in templates:
+            if "{" in tmpl:
+                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
+                raw_signal_patterns.add(wildcard)
             else:
-                all_signal_names.add(sig)
+                raw_signal_patterns.add(tmpl)
 
-        # From condition - extract pattern signals
-        if task.raw_condition and "{" in task.raw_condition:
-            patterns = re.findall(r"[\w.]+\{[\w]+\}[\w.]*", task.raw_condition)
-            # Convert {variable} to {*} for expansion
-            wildcard_patterns = [re.sub(r'\{[^}]+\}', '{*}', p) for p in patterns]
-            expanded = self.fsdb_builder.expand_raw_signals(wildcard_patterns)
-            all_signal_names.update(expanded)
+        # Expand {*} patterns to actual signal names
+        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
 
         # Load all signals
+        # Note: Cache uses normalized names (without bit ranges)
         signal_data = {}
         for sig in all_signal_names:
+            # Normalize signal name by removing bit range
+            normalized_sig = normalize_signal_name(sig)
             try:
-                signal_data[sig] = self.fsdb_builder.get_signal(sig)
+                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
             except RuntimeError:
-                print(f"[WARN] Signal {sig} not found in cache, skipping")
+                print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
 
         if not signal_data:
             print("[WARN] No signals loaded for condition evaluation")
             return []
 
-        max_len = max(len(vals) for vals in signal_data.values())
+        # Get timeout from config and timestamps from FSDB
+        timeout = self.timeout
+        timestamps = self.fsdb_builder.timestamps
+
+        if not timestamps:
+            print("[WARN] No timestamps available from FSDB")
+            return []
+
         log_format = task.logging
 
-        # For each upstream row, search forward
+        # For each upstream row, search forward with time window
         matched_rows = []
+        debug_first_trace = True  # Debug flag for first trace
+
         for trace_id, upstream_row in enumerate(upstream_rows):
-            start_time = upstream_row["time"]
+            start_row_idx = upstream_row["time"]  # Row index
+            start_time = timestamps[start_row_idx]  # Actual FSDB timestamp
 
             if self.verbose:
-                print(f"  Searching from time {start_time}... (trace_id={trace_id})")
+                print(f"  Searching from row {start_row_idx} (time={start_time}) with timeout={timeout}")
 
-            # Search forward from start_time
+            # Search forward from start_row_idx with time window
             match_found = False
-            for row_idx in range(start_time, max_len):
+            for row_idx in range(start_row_idx, len(timestamps)):
+                current_time = timestamps[row_idx]
+
+                # Check time window limit
+                if current_time > start_time + timeout:
+                    if self.verbose:
+                        print(f"    Exceeded timeout at row {row_idx} (time={current_time})")
+                    break
                 try:
                     # Prepare signal values for this row
                     signal_values = {}
@@ -223,26 +266,68 @@ class FsdbAnalyzer:
                         "upstream_data": upstream_data,
                         "vars": {},
                     }
-                    if self.cond_builder.exec(cond, runtime_data):
+
+                    # Debug output for first trace
+                    if debug_first_trace and trace_id == 0:
+                        print(f"\n[DEBUG] First trace evaluation at row {row_idx} (time={current_time}):")
+                        print(f"  Upstream row: time={upstream_row['time']}, signals={list(upstream_row['capd'].keys())}")
+                        print("  Upstream captured values:")
+                        for sig, val in upstream_row['capd'].items():
+                            print(f"    {sig} = {val}")
+                        print("  Current signal values:")
+                        for sig, val in signal_values.items():
+                            print(f"    {sig} = {val}")
+                        print(f"  Condition expression: {cond.raw_expr}")
+
+                    condition_result = self.cond_builder.exec(cond, runtime_data)
+
+                    # Debug condition result for first trace
+                    if debug_first_trace and trace_id == 0:
+                        print(f"  Condition result: {condition_result}")
+                        if runtime_data.get("vars"):
+                            print(f"  Pattern variables: {runtime_data['vars']}")
+                        print()
+
+                    if condition_result:
+                        # Extract pattern variables
+                        vars = runtime_data.get("vars", {})
+
+                        # Disable debug after first match
+                        if debug_first_trace:
+                            debug_first_trace = False
+                            print("[DEBUG] First match found! Disabling further debug output.\n")
+
+                        # Expand capture templates with matched variables
+                        signals = self._expand_templates(templates, vars, task.scope or "")
+
+                        # Build row_data
                         row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
-                        for sig in templates:
-                            vals = signal_data[sig]
-                            row_data["capd"][sig] = (
-                                vals[row_idx] if row_idx < len(vals) else "0"
-                            )
+                        for sig in signals:
+                            # Normalize signal name to match cache keys
+                            normalized_sig = normalize_signal_name(sig)
+                            if normalized_sig in signal_data:
+                                vals = signal_data[normalized_sig]
+                                # Use original signal name (with scope) as key in capd
+                                row_data["capd"][sig] = (
+                                    vals[row_idx] if row_idx < len(vals) else "0"
+                                )
+
                         matched_rows.append(row_data)
                         match_found = True
+
                         if self.verbose:
-                            print(f"    Found match at time {row_idx}")
+                            print(f"    Found match at row {row_idx} (time={current_time})")
+
                         if log_format:
                             log_msg = self.yaml_builder.format_log(
-                                log_format, row_data, templates, row_idx
+                                log_format, row_data, signals, row_idx
                             )
                             print(f"  [LOG] {log_msg}")
+
                         break
                 except Exception as e:
-                    if self.verbose and row_idx == start_time:
-                        print(f"    [Error] at time {row_idx}: {e}")
+                    if self.verbose and row_idx == start_row_idx:
+                        print(f"    [Error] at row {row_idx}: {e}")
                     continue
 
             if not match_found:
