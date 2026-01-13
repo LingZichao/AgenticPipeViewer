@@ -61,65 +61,73 @@ class FsdbAnalyzer:
         return signals
 
     def _trace_trigger(self, task: Task) -> list[dict[str, Any]]:
-        """Normal mode: match all rows globally"""
+        """Trigger mode: match conditions globally, each match starts new trace"""
         templates = task.capture
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
-        # # Collect all signals needed (from both capture and condition)
-        all_needed_signals = set(templates)
-        # # Get signals from condition by parsing the condition expression
-        # # This is a simplified approach - we collect all signals that were resolved during config
-        for sig in self.yaml_builder.collect_raw_signals(self.global_scope):
-            all_needed_signals.add(sig)
-            print(f"[DEBUG] Added signal from condition: {sig}")
+        # Collect all signals needed (from condition + capture templates)
+        all_signal_names = set()
 
+        # Add condition signals (already normalized with {*} wildcards)
+        all_signal_names.update(task.condition.signals)
+
+        # Expand capture templates with {*} wildcards
+        for tmpl in templates:
+            if "{" in tmpl:
+                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
+                all_signal_names.add(wildcard)
+            else:
+                all_signal_names.add(tmpl)
+
+        # Load all signals from FSDB cache (already dumped in run())
         signal_data = {}
-        for sig in all_needed_signals:
-            if "{" not in sig:
-                try:
-                    signal_data[sig] = self.fsdb_builder.get_signal(sig)
-                except (ValueError, RuntimeError, KeyError):
-                    pass
-
-        max_len = max(len(vals) for vals in signal_data.values()) if signal_data else 0
-
-        # Evaluate condition for each row
-        matched_rows = []
-        for row_idx in range(max_len):
+        for sig in all_signal_names:
             try:
-                # Prepare signal values for this row
+                signal_data[sig] = self.fsdb_builder.get_signal(sig)
+            except RuntimeError:
+                print(f"[WARN] Signal {sig} not in cache, skipping")
+
+        if not signal_data:
+            print("[WARN] No signals loaded for evaluation")
+            return []
+
+        max_len = max(len(vals) for vals in signal_data.values())
+
+        # Evaluate condition for each time point
+        matched_rows = []
+        for trace_id, row_idx in enumerate(range(max_len)):
+            try:
+                # Build signal_values for this time point
                 signal_values = {}
                 for sig, vals in signal_data.items():
                     signal_values[sig] = vals[row_idx] if row_idx < len(vals) else '0'
 
                 runtime_data = {
                     "signal_values": signal_values,
-                    "upstream_row" : {},
+                    "upstream_row": {},
                     "upstream_data": {},
                     "vars": {},
                 }
+
                 if self.cond_builder.exec(task.condition, runtime_data):
+                    # Condition matched! Extract pattern variables
                     vars = runtime_data.get("vars", {})
+
+                    # Expand capture templates with matched variables
                     signals = self._expand_templates(templates, vars, task.scope or "")
 
-                    row_data = {"time": row_idx, "capd": {}}
+                    # Build row_data with trace_id
+                    row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
                     for sig in signals:
                         if sig in signal_data:
                             vals = signal_data[sig]
                             row_data["capd"][sig] = (
                                 vals[row_idx] if row_idx < len(vals) else "0"
                             )
-                        else:
-                            try:
-                                vals = self.fsdb_builder.get_signal(sig)
-                                row_data["capd"][sig] = (
-                                    vals[row_idx] if row_idx < len(vals) else "0"
-                                )
-                            except (ValueError, RuntimeError, KeyError):
-                                row_data["capd"][sig] = "0"
 
                     matched_rows.append(row_data)
 
+                    # Log if configured
                     if task.logging:
                         log_msg = self.yaml_builder.format_log(
                             task.logging, row_data, signals, row_idx
@@ -275,7 +283,6 @@ class FsdbAnalyzer:
             print(f"  - {sig}")
         self.fsdb_builder.dump_signals(soi)
 
-        input()
         # Build all conditions after signals are dumped, TODO
         for task in tasks:
             if task.condition is None:
