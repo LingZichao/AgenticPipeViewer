@@ -23,6 +23,7 @@ class Task:
     logging: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     condition: Optional[Condition] = None  # Built Condition object, set later
+    match_mode: str = "all"  # Matching mode: "first", "all", "unique_per_var"
 
     @classmethod
     def from_dict(
@@ -47,6 +48,15 @@ class Task:
         if not task_id or not isinstance(task_id, str):
             raise ValueError("[ERROR] Task 'id' field is required and must be a string")
 
+        # Validate match_mode
+        match_mode = data.get("matchMode", "all")
+        valid_modes = ("first", "all", "unique_per_var")
+        if match_mode not in valid_modes:
+            raise ValueError(
+                f"[ERROR] Task '{task_id}' has invalid matchMode '{match_mode}'. "
+                f"Valid options: {', '.join(valid_modes)}"
+            )
+
         return cls(
             id=task_id,
             raw_condition=raw_condition,
@@ -57,6 +67,7 @@ class Task:
             scope=final_scope,
             deps=data.get("dependsOn", []),
             logging=data.get("logging"),
+            match_mode=match_mode,
         )
 
     def to_dict(self) -> dict[str, Any]:

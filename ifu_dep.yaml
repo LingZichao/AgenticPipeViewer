@@ -8,6 +8,7 @@ scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_to
 output:
   directory: ifu_reports
   verbose: true
+  timeout: 1000000  # 100ns time window (1000000 * 100fs = 100ns)
 
 tasks:
   # ============================================

@@ -123,10 +123,6 @@ class FsdbBuilder:
         # Expand patterns with {*} - this already handles bit ranges
         matched_signals = self.expand_raw_signals(signals)
 
-        print(f"[DEBUG] Total signals after expansion: {len(matched_signals)}")
-        for sig in matched_signals:
-            print(f"  - {sig}")
-
         if not matched_signals:
             print("[WARN] No signals found in FSDB")
             return

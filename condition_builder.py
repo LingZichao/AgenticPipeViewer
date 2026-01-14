@@ -33,11 +33,15 @@ class ExpressionEvaluator(ast.NodeVisitor):
 
     def eval(self, expr: str) -> Any:
         """Evaluate expression, handling custom operators"""
+        # Normalize logical operators: && -> and, || -> or
+        normalized = expr.replace("&&", " and ").replace("||", " or ")
+
         # Normalize: Verilog literals and $dep references
-        normalized = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", verilog_to_int, expr)
+        # Use double underscore __ as separator to avoid conflicts with underscores in names
+        normalized = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", verilog_to_int, normalized)
         for match in re.finditer(r"\$dep\.(\w+)\.(\w+)", normalized):
             normalized = normalized.replace(
-                match.group(0), f"_dep_{match.group(1)}_{match.group(2)}"
+                match.group(0), f"_dep__{match.group(1)}__{match.group(2)}"
             )
 
         # Transform $split() to _split() function call
@@ -97,11 +101,6 @@ class ExpressionEvaluator(ast.NodeVisitor):
                             f"Left operand of <@ must be int, got {type(left)}"
                         )
                     result = right.contains(left)
-                    # For signal groups from $split, values are always int
-                    int_values = [v for v in right.values if isinstance(v, int)]
-                    print(
-                        f"[DEBUG] {hex(left)} <@ {[hex(v) for v in int_values]} = {result}"
-                    )
                     if not result:
                         return False
                 else:
@@ -131,14 +130,15 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 # _split(signal, num_parts) -> SignalGroup[int]
                 if len(node.args) != 2:
                     raise ValueError("_split() requires exactly 2 arguments")
+                # Reset bit width tracking before visiting the signal argument
+                self._last_dep_bitwidth = 0
                 signal_val = self.visit(node.args[0])
                 num_parts = self.visit(node.args[1])
+                # Use stored bit width if available (from $dep reference)
+                bit_width = getattr(self, '_last_dep_bitwidth', 0)
                 # split_signal returns List[int], so this is type-safe
-                int_values: List[int] = split_signal(hex(signal_val), num_parts)
+                int_values: List[int] = split_signal(hex(signal_val), num_parts, bit_width)
                 result = SignalGroup(values=int_values)
-                print(
-                    f"[DEBUG] $split({hex(signal_val)}, {num_parts}) = {[hex(v) for v in int_values]}"
-                )
                 return result
             elif node.func.id == "_contains":
                 # _contains(value, group) -> bool
@@ -148,20 +148,21 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 right_val = self.visit(node.args[1])
                 # Right side should be a SignalGroup
                 if isinstance(right_val, SignalGroup):
-                    result = right_val.contains(left_val)
-                    print(
-                        f"[DEBUG] {hex(left_val)} <@ {[hex(v) for v in right_val.values]} = {result}"
-                    )
-                    return result
+                    return right_val.contains(left_val)
                 # If not a group, treat as single value comparison
                 return left_val == right_val
         raise ValueError(f"Unsupported function call: {ast.unparse(node)}")
 
     def visit_Name(self, node: ast.Name) -> Any:
         name = node.id
-        if name.startswith("_dep_"):
-            parts = name.split("_", 3)
-            signal_name = parts[3]
+        if name.startswith("_dep__"):
+            # Format: _dep__taskid__signalname (using __ as separator)
+            parts = name.split("__")
+            if len(parts) >= 3:
+                # parts[0] = "_dep", parts[1] = taskid, parts[2] = signalname
+                signal_name = parts[2]
+            else:
+                raise ValueError(f"Invalid $dep format: {name}")
             for sig in self.upstream_data.get("capd", []):
                 if (
                     sig.endswith("." + signal_name)
@@ -169,11 +170,14 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     or sig == signal_name
                 ):
                     val_str = self.upstream_row["capd"].get(sig, "0")
-                    return (
-                        int(val_str, 16)
-                        if val_str.startswith("0x")
-                        else int("0x" + val_str, 16)
-                    )
+                    # Store the original hex string length for bit width calculation
+                    # This is used by $split to preserve leading zeros
+                    clean_str = val_str[2:] if val_str.startswith("0x") else val_str
+                    val_int = int("0x" + clean_str, 16)
+                    # Store bit width as metadata (hack: use tuple to pass both)
+                    # The caller will extract the int value, but _split can use this
+                    self._last_dep_bitwidth = len(clean_str) * 4
+                    return val_int
             raise ValueError(f"Signal '{signal_name}' not found in upstream")
 
         signal = resolve_signal_path(name, self.scope)
@@ -193,9 +197,15 @@ class ExpressionEvaluator(ast.NodeVisitor):
         )
 
         if isinstance(node.slice, ast.Slice):
-            high = self.visit(node.slice.upper) if node.slice.upper else None
-            low = self.visit(node.slice.lower) if node.slice.lower else None
-            if high is not None and low is not None:
+            # Python parses [31:0] as lower=31, upper=0
+            # But Verilog convention is [high:low], so we need to handle this
+            # Python slice: [start:stop] -> lower=start, upper=stop
+            # Verilog slice: [msb:lsb] -> we want high=msb, low=lsb
+            msb = self.visit(node.slice.lower) if node.slice.lower else None  # Left of colon
+            lsb = self.visit(node.slice.upper) if node.slice.upper else None  # Right of colon
+            if msb is not None and lsb is not None:
+                # Ensure msb >= lsb (Verilog convention)
+                high, low = (msb, lsb) if msb >= lsb else (lsb, msb)
                 return (val_int >> low) & ((1 << (high - low + 1)) - 1)
             return val_int
         else:
@@ -272,10 +282,10 @@ class ConditionParser:
         # Remove Verilog literals (replace with 0 for AST parsing)
         normalized = re.sub(r"\d+'[bhdoBHDO][0-9a-fA-F_]+", "0", normalized)
 
-        # Normalize $dep references to _dep_ format
+        # Normalize $dep references to _dep__ format (using __ as separator)
         for match in re.finditer(r"\$dep\.(\w+)\.(\w+)", normalized):
             normalized = normalized.replace(
-                match.group(0), f"_dep_{match.group(1)}_{match.group(2)}"
+                match.group(0), f"_dep__{match.group(1)}__{match.group(2)}"
             )
 
         # Transform $split() to _split() function call
@@ -411,12 +421,12 @@ class ConditionBuilder:
         possible_vals = set()
 
         for pattern in patterns:
-            # Step 1: Convert {variable} to {*} for expansion
-            wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', pattern)
+            # Step 1: Resolve pattern with scope, then convert {variable} to {*}
+            resolved_pattern = resolve_signal_path(pattern, scope)
+            wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', resolved_pattern)
             expanded_signals = fsdb_builder.expand_raw_signals([wildcard_pattern])
 
             # Step 2: Build regex to extract variable value from actual signal names
-            resolved_pattern = resolve_signal_path(pattern, scope)
             extract_regex = re.escape(resolved_pattern).replace(
                 re.escape(f'{{{var_name}}}'), r'([a-zA-Z0-9_$]+)'
             )
@@ -428,7 +438,6 @@ class ConditionBuilder:
                 match = re.match(extract_regex, sig)
                 if match:
                     possible_vals.add(match.group(1))
-
         return SignalGroup(values=list(possible_vals))
 
     def _build_evaluator(
@@ -465,23 +474,28 @@ class ConditionBuilder:
                     )
                 try:
                     expr_eval = ExpressionEvaluator(scope, runtime_data)
-                    return bool(expr_eval.eval(test_expr))
+                    result = bool(expr_eval.eval(test_expr))
+                    return result
                 except (ValueError, RuntimeError, KeyError):
                     return False
 
             # Filter candidates to find matches
             matched_group = candidates.filter(test_value)
 
-            try:
-                matched_val = matched_group.unique()
-                runtime_data["vars"] = {pattern_var: matched_val}
+            if len(matched_group.values) == 0:
+                return False
+            elif len(matched_group.values) == 1:
+                # Unique match - store the matched variable
+                runtime_data["vars"] = {pattern_var: matched_group.values[0]}
                 return True
-            except ValueError:
-                if len(matched_group.values) == 0:
-                    return False
-                raise ValueError(
-                    f"Ambiguous match: {matched_group.values} for '{pattern_var}'"
-                )
+            else:
+                # Multiple matches - store ALL matched variables for fork handling
+                # The caller (_trace_depends) will iterate through these
+                runtime_data["vars"] = {pattern_var: matched_group.values[0]}  # First match
+                runtime_data["_all_matched_vars"] = {
+                    pattern_var: matched_group.values  # All matches
+                }
+                return True  # Return True, let caller handle multiple forks
 
         return evaluator
 

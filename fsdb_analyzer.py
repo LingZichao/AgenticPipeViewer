@@ -140,22 +140,13 @@ class FsdbAnalyzer:
                             row_data["capd"][sig] = (
                                 vals[row_idx] if row_idx < len(vals) else "0"
                             )
-                        else:
-                            # Debug: signal not found in signal_data
-                            if trace_id < 3:  # Only print for first 3 matches
-                                print(f"[DEBUG] Signal {normalized_sig} not found in signal_data at row {row_idx}")
+                        # Signal not found in signal_data - skip silently
 
                     matched_rows.append(row_data)
                     trace_id += 1  # Increment trace_id for each match
 
                     # Log if configured
                     if task.logging:
-                        # Debug: print captured values before formatting
-                        if trace_id <= 3:
-                            print(f"[DEBUG] Captured signals at row {row_idx}:")
-                            for sig, val in row_data["capd"].items():
-                                print(f"  {sig} = {val}")
-
                         log_msg = self.yaml_builder.format_log(
                             task.logging, row_data, signals, row_idx
                         )
@@ -166,10 +157,17 @@ class FsdbAnalyzer:
         return matched_rows
 
     def _trace_depends(self, task: Task) -> list[dict[str, Any]]:
-        """Trace mode: match from upstream dependent task"""
+        """Trace mode: match from upstream with trace fork support
+
+        Supports three matching modes via task.match_mode:
+        - "first": Original behavior, capture first match and break
+        - "all": Capture ALL matches in time window (default)
+        - "unique_per_var": One match per unique pattern variable combination
+        """
         templates = task.capture
         depends = task.deps
         dep_id = depends[0] if depends else None
+        match_mode = task.match_mode  # "first", "all", "unique_per_var"
 
         if dep_id not in self.runtime_data:
             raise ValueError(
@@ -180,7 +178,7 @@ class FsdbAnalyzer:
         upstream_rows = upstream_data["rows"]
 
         print(
-            f"Tracing from upstream dependent task '{dep_id}' with {len(upstream_rows)} rows"
+            f"Tracing from upstream '{dep_id}' ({len(upstream_rows)} rows) with matchMode='{match_mode}'"
         )
         if self.verbose and upstream_rows:
             print(
@@ -233,27 +231,28 @@ class FsdbAnalyzer:
 
         log_format = task.logging
 
-        # For each upstream row, search forward with time window
+        # For each upstream row, search forward with time window and fork support
         matched_rows = []
-        debug_first_trace = True  # Debug flag for first trace
 
         for trace_id, upstream_row in enumerate(upstream_rows):
             start_row_idx = upstream_row["time"]  # Row index
             start_time = timestamps[start_row_idx]  # Actual FSDB timestamp
 
             if self.verbose:
-                print(f"  Searching from row {start_row_idx} (time={start_time}) with timeout={timeout}")
+                print(f"  Trace {trace_id}: searching from row {start_row_idx} (time={start_time})")
 
-            # Search forward from start_row_idx with time window
-            match_found = False
+            fork_id = 0
+            seen_vars: set[tuple[tuple[str, str], ...]] = set()  # For unique_per_var mode
+
             for row_idx in range(start_row_idx, len(timestamps)):
                 current_time = timestamps[row_idx]
 
                 # Check time window limit
                 if current_time > start_time + timeout:
                     if self.verbose:
-                        print(f"    Exceeded timeout at row {row_idx} (time={current_time})")
+                        print(f"    Timeout at row {row_idx} (time={current_time}), {fork_id} forks found")
                     break
+
                 try:
                     # Prepare signal values for this row
                     signal_values = {}
@@ -267,73 +266,145 @@ class FsdbAnalyzer:
                         "vars": {},
                     }
 
-                    # Debug output for first trace
-                    if debug_first_trace and trace_id == 0:
-                        print(f"\n[DEBUG] First trace evaluation at row {row_idx} (time={current_time}):")
-                        print(f"  Upstream row: time={upstream_row['time']}, signals={list(upstream_row['capd'].keys())}")
-                        print("  Upstream captured values:")
-                        for sig, val in upstream_row['capd'].items():
-                            print(f"    {sig} = {val}")
-                        print("  Current signal values:")
-                        for sig, val in signal_values.items():
-                            print(f"    {sig} = {val}")
-                        print(f"  Condition expression: {cond.raw_expr}")
-
                     condition_result = self.cond_builder.exec(cond, runtime_data)
 
-                    # Debug condition result for first trace
-                    if debug_first_trace and trace_id == 0:
-                        print(f"  Condition result: {condition_result}")
-                        if runtime_data.get("vars"):
-                            print(f"  Pattern variables: {runtime_data['vars']}")
-                        print()
-
                     if condition_result:
-                        # Extract pattern variables
-                        vars = runtime_data.get("vars", {})
+                        # Check for multiple matched variables (pattern condition with multiple valid values)
+                        all_matched = runtime_data.get("_all_matched_vars", {})
+                        single_vars = runtime_data.get("vars", {})
 
-                        # Disable debug after first match
-                        if debug_first_trace:
-                            debug_first_trace = False
-                            print("[DEBUG] First match found! Disabling further debug output.\n")
+                        # Determine the list of variable combinations to process
+                        if all_matched:
+                            # Multiple matches at this time step - iterate through all
+                            var_name = list(all_matched.keys())[0]
+                            all_var_values = all_matched[var_name]
+                        else:
+                            # Single match
+                            var_name = list(single_vars.keys())[0] if single_vars else None
+                            all_var_values = [single_vars.get(var_name)] if var_name else [None]
 
-                        # Expand capture templates with matched variables
-                        signals = self._expand_templates(templates, vars, task.scope or "")
+                        # Process each matched variable value
+                        for var_val in all_var_values:
+                            matched_vars = {var_name: var_val} if var_name and var_val else {}
 
-                        # Build row_data
-                        row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
-                        for sig in signals:
-                            # Normalize signal name to match cache keys
-                            normalized_sig = normalize_signal_name(sig)
-                            if normalized_sig in signal_data:
-                                vals = signal_data[normalized_sig]
-                                # Use original signal name (with scope) as key in capd
-                                row_data["capd"][sig] = (
-                                    vals[row_idx] if row_idx < len(vals) else "0"
+                            # Apply match mode filtering
+                            if match_mode == "first":
+                                # Original behavior: capture first match, break
+                                row_data = self._build_row_data(
+                                    row_idx, trace_id, fork_id, matched_vars,
+                                    templates, signal_data, task
                                 )
+                                matched_rows.append(row_data)
 
-                        matched_rows.append(row_data)
-                        match_found = True
+                                if self.verbose:
+                                    print(f"    Fork {fork_id}: match at row {row_idx} (time={current_time})")
 
-                        if self.verbose:
-                            print(f"    Found match at row {row_idx} (time={current_time})")
+                                if log_format:
+                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
+                                    print(f"    [LOG] {log_msg}")
 
-                        if log_format:
-                            log_msg = self.yaml_builder.format_log(
-                                log_format, row_data, signals, row_idx
-                            )
-                            print(f"  [LOG] {log_msg}")
+                                break  # Stop after first match
 
-                        break
+                            elif match_mode == "unique_per_var":
+                                # One match per unique pattern variable combination
+                                var_key = tuple(sorted(matched_vars.items()))
+                                if var_key in seen_vars:
+                                    continue  # Skip duplicate var combinations
+                                seen_vars.add(var_key)
+
+                                row_data = self._build_row_data(
+                                    row_idx, trace_id, fork_id, matched_vars,
+                                    templates, signal_data, task
+                                )
+                                matched_rows.append(row_data)
+
+                                if self.verbose:
+                                    print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
+
+                                if log_format:
+                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
+                                    print(f"    [LOG] {log_msg}")
+
+                                fork_id += 1
+
+                            else:  # match_mode == "all" (default)
+                                # Capture ALL matches in time window
+                                row_data = self._build_row_data(
+                                    row_idx, trace_id, fork_id, matched_vars,
+                                    templates, signal_data, task
+                                )
+                                matched_rows.append(row_data)
+
+                                if self.verbose:
+                                    print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
+
+                                if log_format:
+                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
+                                    print(f"    [LOG] {log_msg}")
+
+                                fork_id += 1
+
+                        # For "first" mode, break out of the outer time loop too
+                        if match_mode == "first" and matched_rows:
+                            break
+
                 except Exception as e:
-                    if self.verbose and row_idx == start_row_idx:
+                    if self.verbose:
                         print(f"    [Error] at row {row_idx}: {e}")
                     continue
 
-            if not match_found:
-                print(f"[WARN] No match found for upstream row at time {start_time}")
+            if fork_id == 0:
+                print(f"[WARN] No match found for trace {trace_id} at time {start_time}")
 
         return matched_rows
+
+    def _build_row_data(
+        self,
+        row_idx: int,
+        trace_id: int,
+        fork_id: int,
+        vars: dict[str, str],
+        templates: list[str],
+        signal_data: dict[str, list[str]],
+        task: Task,
+    ) -> dict[str, Any]:
+        """Build row_data with fork support
+
+        Args:
+            row_idx: Current row index in signal data
+            trace_id: Upstream trace identifier
+            fork_id: Fork index within this trace
+            vars: Matched pattern variables
+            templates: Capture signal templates
+            signal_data: Signal cache data
+            task: Task configuration
+
+        Returns:
+            Row data dictionary with trace info and captured values
+        """
+        # Expand capture templates with matched variables
+        signals = self._expand_templates(templates, vars, task.scope or "")
+
+        row_data: dict[str, Any] = {
+            "time": row_idx,
+            "trace_id": trace_id,
+            "fork_id": fork_id,
+            "vars": vars.copy(),
+            "capd": {},
+        }
+
+        for sig in signals:
+            # Normalize signal name to match cache keys
+            normalized_sig = normalize_signal_name(sig)
+            if normalized_sig in signal_data:
+                vals = signal_data[normalized_sig]
+                # Use original signal name (with scope) as key in capd
+                row_data["capd"][sig] = vals[row_idx] if row_idx < len(vals) else "0"
+
+        return row_data
 
     def _capture_task(self, task: Task) -> str:
         """Execute capture mode task"""
@@ -363,9 +434,6 @@ class FsdbAnalyzer:
         task_order = self.yaml_builder.build_exec_order()
         # Collect all signals-of-interest from all tasks using YamlBuilder
         soi = self.yaml_builder.collect_raw_signals(self.global_scope)
-        print(f"[DEBUG] Collected {len(soi)} raw signals")
-        for sig in soi:
-            print(f"  - {sig}")
         self.fsdb_builder.dump_signals(soi)
 
         # Build all conditions after signals are dumped, TODO

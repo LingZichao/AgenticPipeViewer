@@ -66,20 +66,27 @@ def resolve_signal_path(signal: str, scope: str) -> str:
     return signal
 
 
-def split_signal(signal_val: str, num_parts: int) -> list[int]:
+def split_signal(signal_val: str, num_parts: int, bit_width: int = 0) -> list[int]:
     """Split a wide signal value into equal parts
 
     Args:
         signal_val: Hex signal value (with or without 0x prefix)
         num_parts: Number of parts to split into
+        bit_width: Optional explicit bit width. If 0, infer from string length.
 
     Returns:
-        List of integer values for each part
+        List of integer values for each part (LSB first)
     """
     if signal_val.startswith('0x') or signal_val.startswith('0X'):
         signal_val = signal_val[2:]
     val_int = int(signal_val, 16)
-    total_bits = len(signal_val) * 4
+
+    # If bit_width not specified, infer from string length
+    if bit_width == 0:
+        total_bits = len(signal_val) * 4
+    else:
+        total_bits = bit_width
+
     bits_per_part = total_bits // num_parts
     mask = (1 << bits_per_part) - 1
     return [(val_int >> (i * bits_per_part)) & mask for i in range(num_parts)]
