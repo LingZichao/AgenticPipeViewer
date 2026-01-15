@@ -129,8 +129,8 @@ class FsdbAnalyzer:
                     # Expand capture templates with matched variables
                     signals = self._expand_templates(templates, vars, task.scope or "")
 
-                    # Build row_data with trace_id
-                    row_data = {"time": row_idx, "trace_id": trace_id, "capd": {}}
+                    # Build row_data with trace_id and fork_path (root has empty fork_path)
+                    row_data = {"time": row_idx, "trace_id": trace_id, "fork_path": [], "capd": {}}
                     for sig in signals:
                         # Normalize signal name to match cache keys
                         normalized_sig = normalize_signal_name(sig)
@@ -236,12 +236,15 @@ class FsdbAnalyzer:
         # For each upstream row, search forward with time window and fork support
         matched_rows = []
 
-        for trace_id, upstream_row in enumerate(upstream_rows): # TODO： Fix wrong trace id
+        for upstream_row in upstream_rows:
+            # Inherit trace_id from upstream (fixes trace lineage)
+            upstream_trace_id = upstream_row["trace_id"]
+            upstream_fork_path = upstream_row.get("fork_path", [])
             start_row_idx = upstream_row["time"]  # Row index
             start_time = timestamps[start_row_idx]  # Actual FSDB timestamp
 
             if self.verbose:
-                print(f"  Trace {trace_id}: searching from row {start_row_idx} (time={start_time})")
+                print(f"  Trace {upstream_trace_id} (path={upstream_fork_path}): searching from row {start_row_idx} (time={start_time})")
 
             fork_id = 0
             seen_vars: set[tuple[tuple[str, str], ...]] = set()  # For unique_per_var mode
@@ -298,8 +301,8 @@ class FsdbAnalyzer:
                             if match_mode == "first":
                                 # Original behavior: capture first match, break
                                 row_data = self._build_row_data(
-                                    row_idx, trace_id, fork_id, matched_vars,
-                                    templates, signal_data, task
+                                    row_idx, upstream_trace_id, fork_id, upstream_fork_path,
+                                    matched_vars, templates, signal_data, task
                                 )
                                 matched_rows.append(row_data)
 
@@ -321,8 +324,8 @@ class FsdbAnalyzer:
                                 seen_vars.add(var_key)
 
                                 row_data = self._build_row_data(
-                                    row_idx, trace_id, fork_id, matched_vars,
-                                    templates, signal_data, task
+                                    row_idx, upstream_trace_id, fork_id, upstream_fork_path,
+                                    matched_vars, templates, signal_data, task
                                 )
                                 matched_rows.append(row_data)
 
@@ -339,8 +342,8 @@ class FsdbAnalyzer:
                             else:  # match_mode == "all" (default)
                                 # Capture ALL matches in time window
                                 row_data = self._build_row_data(
-                                    row_idx, trace_id, fork_id, matched_vars,
-                                    templates, signal_data, task
+                                    row_idx, upstream_trace_id, fork_id, upstream_fork_path,
+                                    matched_vars, templates, signal_data, task
                                 )
                                 matched_rows.append(row_data)
 
@@ -364,7 +367,7 @@ class FsdbAnalyzer:
                     continue
 
             if fork_id == 0:
-                print(f"[WARN] No match found for trace {trace_id} at time {start_time}")
+                print(f"[WARN] No match found for trace {upstream_trace_id} (path={upstream_fork_path}) at time {start_time}")
 
         return matched_rows
 
@@ -373,6 +376,7 @@ class FsdbAnalyzer:
         row_idx: int,
         trace_id: int,
         fork_id: int,
+        upstream_fork_path: list[int],
         vars: dict[str, str],
         templates: list[str],
         signal_data: dict[str, list[str]],
@@ -382,8 +386,9 @@ class FsdbAnalyzer:
 
         Args:
             row_idx: Current row index in signal data
-            trace_id: Upstream trace identifier
+            trace_id: Upstream trace identifier (inherited from root)
             fork_id: Fork index within this trace
+            upstream_fork_path: Fork path from upstream row
             vars: Matched pattern variables
             templates: Capture signal templates
             signal_data: Signal cache data
@@ -398,6 +403,7 @@ class FsdbAnalyzer:
         row_data: dict[str, Any] = {
             "time": row_idx,
             "trace_id": trace_id,
+            "fork_path": upstream_fork_path + [fork_id],
             "fork_id": fork_id,
             "vars": vars.copy(),
             "capd": {},
