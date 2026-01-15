@@ -168,6 +168,7 @@ class FsdbAnalyzer:
         depends = task.deps
         dep_id = depends[0] if depends else None
         match_mode = task.match_mode  # "first", "all", "unique_per_var"
+        max_match = task.max_match  # 0 = unlimited
 
         if dep_id not in self.runtime_data:
             raise ValueError(
@@ -177,8 +178,9 @@ class FsdbAnalyzer:
         upstream_data = self.runtime_data[dep_id]
         upstream_rows = upstream_data["rows"]
 
+        max_match_info = f", maxMatch={max_match}" if max_match > 0 else ""
         print(
-            f"Tracing from upstream '{dep_id}' ({len(upstream_rows)} rows) with matchMode='{match_mode}'"
+            f"Tracing from upstream '{dep_id}' ({len(upstream_rows)} rows) with matchMode='{match_mode}'{max_match_info}"
         )
         if self.verbose and upstream_rows:
             print(
@@ -234,7 +236,7 @@ class FsdbAnalyzer:
         # For each upstream row, search forward with time window and fork support
         matched_rows = []
 
-        for trace_id, upstream_row in enumerate(upstream_rows):
+        for trace_id, upstream_row in enumerate(upstream_rows): # TODO： Fix wrong trace id
             start_row_idx = upstream_row["time"]  # Row index
             start_time = timestamps[start_row_idx]  # Actual FSDB timestamp
 
@@ -253,6 +255,12 @@ class FsdbAnalyzer:
                         print(f"    Timeout at row {row_idx} (time={current_time}), {fork_id} forks found")
                     break
 
+                # Check max_match limit (per upstream trigger)
+                if max_match > 0 and fork_id >= max_match:
+                    if self.verbose:
+                        print(f"    Max match limit ({max_match}) reached at row {row_idx}, stopping")
+                    break
+
                 try:
                     # Prepare signal values for this row
                     signal_values = {}
@@ -267,7 +275,6 @@ class FsdbAnalyzer:
                     }
 
                     condition_result = self.cond_builder.exec(cond, runtime_data)
-
                     if condition_result:
                         # Check for multiple matched variables (pattern condition with multiple valid values)
                         all_matched = runtime_data.get("_all_matched_vars", {})

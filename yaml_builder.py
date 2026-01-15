@@ -24,6 +24,7 @@ class Task:
     metadata: dict[str, Any] = field(default_factory=dict)
     condition: Optional[Condition] = None  # Built Condition object, set later
     match_mode: str = "all"  # Matching mode: "first", "all", "unique_per_var"
+    max_match: int = 0  # Maximum matches per upstream trigger (0 = unlimited)
 
     @classmethod
     def from_dict(
@@ -57,6 +58,14 @@ class Task:
                 f"Valid options: {', '.join(valid_modes)}"
             )
 
+        # Validate max_match
+        max_match = data.get("maxMatch", 0)
+        if not isinstance(max_match, int) or max_match < 0:
+            raise ValueError(
+                f"[ERROR] Task '{task_id}' has invalid maxMatch '{max_match}'. "
+                f"Must be a non-negative integer (0 = unlimited)"
+            )
+
         return cls(
             id=task_id,
             raw_condition=raw_condition,
@@ -68,6 +77,7 @@ class Task:
             deps=data.get("dependsOn", []),
             logging=data.get("logging"),
             match_mode=match_mode,
+            max_match=max_match,
         )
 
     def to_dict(self) -> dict[str, Any]:
