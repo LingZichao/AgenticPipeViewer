@@ -1,0 +1,273 @@
+# FSDB Analyzer - IFU Instruction Flow Tracking
+# Traces an instruction from entry to exit in the IFU pipeline
+# Updated based on actual IFU architecture with multi-level memory access
+# Following the correct trigger/trace pattern from USAGE.md
+# Updated to handle IFU fetching 4 instructions simultaneously
+
+fsdbFile: /home/c910/lingzichao/openc910/smart_run/work_force/novas.fsdb
+clockSignal: tb.clk
+# 全局scope（可选）- 简化信号路径书写
+scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.x_ct_ifu_top
+
+output:
+  directory: ifu_reports
+  verbose: true
+  timeout: 10000000  # 1000ns time window (10000000 * 100fs = 1000ns)
+
+tasks:
+  # ============================================
+  # TASK 1： TRIGGER - 捕获PC生成事件
+  # ============================================
+  - id: pc_generation
+    name: "PC Generation Trigger"
+    # 无dependsOn，这是Trigger任务，全局扫描
+    condition:
+      - "pcgen_ifctrl_pc[31:0] !== 32'h0 && pcgen_ifctrl_pc[31:0] !== 32'hxxxxxxxx"
+
+    capture:
+      - pcgen_ifctrl_pc
+      - pcgen_ifctrl_way_pred
+      
+    logging:
+      - "PC Generation Trigger: {pcgen_ifctrl_pc}"
+
+  # ============================================
+  # TASK 2： TRACE - 捕获ICache查找结果
+  # ============================================
+  - id: icache_lookup
+    name: "ICache Lookup Trace"
+    dependsOn: pc_generation    # 从PC生成的时间点开始搜索
+    
+    condition:
+      - "icache_if_ifctrl_inst_data0 !== 128'h0 && icache_if_ifctrl_inst_data0 !== 128'hxxxxxxxx"
+    
+    capture:
+      - icache_if_ifctrl_inst_data0
+      - icache_if_ifctrl_inst_data1
+      - ifctrl_icache_if_index
+      - ifctrl_icache_if_tag_req
+    
+    logging:
+      - ICache Lookup: PC={pcgen_ifctrl_pc} -> Data: {icache_if_ifctrl_inst_data0}
+
+  # ============================================
+  # TASK 3： TRACE - 捕获ICache Miss事件
+  # ============================================
+  - id: icache_miss
+    name: "ICache Miss Trace"
+    dependsOn: icache_lookup    # 从ICache查找的时间点开始搜索
+    
+    condition:
+      - "ifctrl_l1_refill_inv_on == 1'b1 || ifu_hpcp_icache_miss == 1'b1"
+    
+    capture:
+      - ifctrl_l1_refill_inv_on
+      - ifu_hpcp_icache_miss
+      - l1_refill_ifctrl_pc
+      - l1_refill_ifctrl_start
+    
+    logging:
+      - ICache Miss: Refill for PC: {l1_refill_ifctrl_pc}
+
+  # ============================================
+  # TASK 4： TRACE - 捕获外部总线请求
+  # ============================================
+  - id: bus_request
+    name: "External Bus Request Trace"
+    dependsOn: icache_miss      # 从ICache Miss的时间点开始搜索
+    
+    condition:
+      - "ifu_biu_rd_req == 1'b1 && ifu_biu_rd_addr !== 32'hxxxxxxxx"
+    
+    capture:
+      - ifu_biu_rd_req
+      - ifu_biu_rd_addr
+      - ifu_biu_rd_size
+      - ifu_biu_rd_len
+    
+    logging:
+      - Bus Request: Addr={ifu_biu_rd_addr}, Size={ifu_biu_rd_size}
+
+  # ============================================
+  # TASK 5： TRACE - 捕获外部数据接收
+  # ============================================
+  - id: data_receive
+    name: "Data Receive Trace"
+    dependsOn: bus_request      # 从总线请求的时间点开始搜索
+    
+    condition:
+      - "biu_ifu_rd_data_vld == 1'b1 && biu_ifu_rd_data !== 128'h0"
+    
+    capture:
+      - biu_ifu_rd_data
+      - biu_ifu_rd_data_vld
+      - biu_ifu_rd_resp
+    
+    logging:
+      - Data Receive: {biu_ifu_rd_data}
+
+  # ============================================
+  # TASK 6： TRACE - 捕获L1 Refill事件
+  # ============================================
+  - id: l1_refill
+    name: "L1 Cache Refill Trace"
+    dependsOn: data_receive     # 从数据接收的时间点开始搜索
+    
+    condition:
+      - "l1_refill_icache_if_wr == 1'b1"
+    
+    capture:
+      - l1_refill_icache_if_wr
+      - l1_refill_icache_if_index
+      - l1_refill_icache_if_inst_data
+    
+    logging:
+      - L1 Refill: Index={l1_refill_icache_if_index}, Data={l1_refill_icache_if_inst_data}
+
+  # ============================================
+  # TASK 7： TRACE - 捕获IFU数据路径处理
+  # ============================================
+  - id: ifu_processing
+    name: "IFU Datapath Processing Trace"
+    dependsOn: l1_refill        # 从L1 Refill的时间点开始搜索
+    
+    condition:
+      - "ifdp_ipdp_h1_inst_low_way0 !== 1'hx || ifdp_ipdp_h1_inst_high_way0 !== 13'hxxx"
+    
+    capture:
+      - ifdp_ipdp_h1_inst_low_way0
+      - ifdp_ipdp_h1_inst_high_way0
+      - ifdp_ipdp_h1_precode_way0
+    
+    logging:
+      - IFU Processing: Low={ifdp_ipdp_h1_inst_low_way0}, High={ifdp_ipdp_h1_inst_high_way0}
+
+  # ============================================
+  # TASK 8： TRACE - 捕获指令缓冲区进入（可能包含4条指令）
+  # ============================================
+  - id: buffer_entry
+    name: "Instruction Buffer Entry Trace"
+    dependsOn: ifu_processing   # 从IFU处理的时间点开始搜索
+    
+    condition:
+      - "ibdp_ibuf_h0_vld == 1'b1"
+    
+    capture:
+      - ibdp_ibuf_h0_data
+      - ibdp_ibuf_h0_pc
+      - ibdp_ibuf_h0_vld
+      - ibdp_ibuf_h1_data
+      - ibdp_ibuf_h1_pc
+      - ibdp_ibuf_h1_vld
+      - ibdp_ibuf_h2_data
+      - ibdp_ibuf_h2_pc
+      - ibdp_ibuf_h2_vld
+      - ibdp_ibuf_h3_data
+      - ibdp_ibuf_h3_pc
+      - ibdp_ibuf_h3_vld
+    
+    logging:
+      - Buffer Entry: H0={ibdp_ibuf_h0_data}@{ibdp_ibuf_h0_pc}, H1={ibdp_ibuf_h1_data}@{ibdp_ibuf_h1_pc}, H2={ibdp_ibuf_h2_data}@{ibdp_ibuf_h2_pc}, H3={ibdp_ibuf_h3_data}@{ibdp_ibuf_h3_pc}
+
+  # ============================================
+  # TASK 9： TRACE - 捕获4条指令离开IFU（分开处理每条指令）
+  # ============================================
+  - id: inst0_exit_ifu
+    name: "Instruction 0 Exit IFU Trace"
+    dependsOn: buffer_entry     # 从缓冲区进入的时间点开始搜索
+    
+    matchMode: unique_per_var
+    maxMatch: 1
+    condition:
+      - "ifu_idu_ib_inst0_data[31:0] !== 32'hxxxxxxxx && ifu_idu_ib_inst0_vld == 1'b1"
+      - "&& ifu_idu_ib_inst0_data[15:0] == $dep.buffer_entry.ibdp_ibuf_h0_data[15:0]"
+    
+    capture:
+      - ifu_idu_ib_inst0_data
+      - ifu_idu_ib_inst0_vld
+    
+    logging:
+      - Instruction 0 Exit IFU: Inst={ifu_idu_ib_inst0_data}, Valid={ifu_idu_ib_inst0_vld}
+
+  - id: inst1_exit_ifu
+    name: "Instruction 1 Exit IFU Trace"
+    dependsOn: buffer_entry     # 从缓冲区进入的时间点开始搜索
+    
+    matchMode: unique_per_var
+    maxMatch: 1
+    condition:
+      - "ifu_idu_ib_inst1_data[31:0] !== 32'hxxxxxxxx && ifu_idu_ib_inst1_vld == 1'b1"
+      - "&& ifu_idu_ib_inst1_data[15:0] == $dep.buffer_entry.ibdp_ibuf_h1_data[15:0]"
+    
+    capture:
+      - ifu_idu_ib_inst1_data
+      - ifu_idu_ib_inst1_vld
+    
+    logging:
+      - Instruction 1 Exit IFU: Inst={ifu_idu_ib_inst1_data}, Valid={ifu_idu_ib_inst1_vld}
+
+  - id: inst2_exit_ifu
+    name: "Instruction 2 Exit IFU Trace"
+    dependsOn: buffer_entry     # 从缓冲区进入的时间点开始搜索
+    
+    matchMode: unique_per_var
+    maxMatch: 1
+    condition:
+      - "ifu_idu_ib_inst2_data[31:0] !== 32'hxxxxxxxx && ifu_idu_ib_inst2_vld == 1'b1"
+      - "&& ifu_idu_ib_inst2_data[15:0] == $dep.buffer_entry.ibdp_ibuf_h2_data[15:0]"
+    
+    capture:
+      - ifu_idu_ib_inst2_data
+      - ifu_idu_ib_inst2_vld
+    
+    logging:
+      - Instruction 2 Exit IFU: Inst={ifu_idu_ib_inst2_data}, Valid={ifu_idu_ib_inst2_vld}
+
+  - id: inst3_exit_ifu
+    name: "Instruction 3 Exit IFU Trace"
+    dependsOn: buffer_entry     # 从缓冲区进入的时间点开始搜索
+    
+    matchMode: unique_per_var
+    maxMatch: 1
+    condition:
+      - "ifu_idu_ib_inst3_data[31:0] !== 32'hxxxxxxxx && ifu_idu_ib_inst3_vld == 1'b1"
+      - "&& ifu_idu_ib_inst3_data[15:0] == $dep.buffer_entry.ibdp_ibuf_h3_data[15:0]"
+    
+    capture:
+      - ifu_idu_ib_inst3_data
+      - ifu_idu_ib_inst3_vld
+    
+    logging:
+      - Instruction 3 Exit IFU: Inst={ifu_idu_ib_inst3_data}, Valid={ifu_idu_ib_inst3_vld}
+
+  # ============================================
+  # TASK 10： TRACE - 完整指令流验证（验证所有4条指令）
+  # ============================================
+  - id: complete_flow
+    name: "Complete Instruction Flow Validation"
+    dependsOn: inst0_exit_ifu   # 从第一条指令离开IFU的时间点开始搜索
+    
+    matchMode: first
+    maxMatch: 1
+    condition:
+      - "$dep.pc_generation.pcgen_ifctrl_pc[31:0] == $dep.buffer_entry.ibdp_ibuf_h0_pc[31:0]"
+      - "&& $dep.buffer_entry.ibdp_ibuf_h0_data[15:0] == $dep.inst0_exit_ifu.ifu_idu_ib_inst0_data[15:0]"
+    
+    capture:
+      - pcgen_ifctrl_pc
+      - icache_if_ifctrl_inst_data0
+      - biu_ifu_rd_data
+      - l1_refill_icache_if_inst_data
+      - ifdp_ipdp_h1_inst_low_way0
+      - ibdp_ibuf_h0_data
+      - ifu_idu_ib_inst0_data
+      - ifu_idu_ib_inst0_vld
+      - ifu_idu_ib_inst1_data
+      - ifu_idu_ib_inst1_vld
+      - ifu_idu_ib_inst2_data
+      - ifu_idu_ib_inst2_vld
+      - ifu_idu_ib_inst3_data
+      - ifu_idu_ib_inst3_vld
+    
+    logging:
+      - Complete Flow Verified: PC={pcgen_ifctrl_pc} -> Exit Inst0={ifu_idu_ib_inst0_data}, Inst1={ifu_idu_ib_inst1_data}, Inst2={ifu_idu_ib_inst2_data}, Inst3={ifu_idu_ib_inst3_data}
