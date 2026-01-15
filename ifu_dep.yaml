@@ -23,7 +23,7 @@ tasks:
       - biu_ifu_rd_data
 
     logging:
-      - Captured a biu read data {biu_ifu_rd_data}
+      - "Captured a biu read data {biu_ifu_rd_data}"
 
   # ============================================
   # 下游任务1：使用$dep引用

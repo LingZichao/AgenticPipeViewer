@@ -172,6 +172,9 @@ class YamlBuilder:
             # Normalize condition to single string
             if "condition" in task:
                 task["condition"] = self._normalize_condition(task["condition"])
+            # Normalize logging to single string
+            if "logging" in task:
+                task["logging"] = self._normalize_logging(task["logging"])
             # Normalize dependsOn to list
             if "dependsOn" in task:
                 depends = task["dependsOn"]
@@ -253,6 +256,14 @@ class YamlBuilder:
         elif isinstance(condition, list):
             return " ".join(line.strip() for line in condition if line.strip())
         return str(condition)
+
+    def _normalize_logging(self, logging: Union[str, list[str]]) -> str:
+        """Normalize logging to single format string"""
+        if isinstance(logging, str):
+            return logging.strip()
+        elif isinstance(logging, list):
+            return " ".join(line.strip() for line in logging if line.strip())
+        return str(logging)
 
     def _validate_task(self, task: dict[str, Any], task_num: int) -> None:
         """Validate task configuration"""
