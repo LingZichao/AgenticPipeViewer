@@ -8,3 +8,4 @@ fsdbreportLog
 out.txt
 
 *reports
+*.yaml

@@ -12,7 +12,7 @@ from utils import resolve_signal_path, normalize_signal_name
 class FsdbAnalyzer:
     """Advanced FSDB signal analyzer with complex condition support"""
 
-    def __init__(self, config_path: str) -> None:
+    def __init__(self, config_path: str, deps_only: bool = False) -> None:
         """Initialize analyzer from config file"""
         config_file = Path(config_path)
         if not config_file.exists():
@@ -22,22 +22,26 @@ class FsdbAnalyzer:
             print(f"[WARN] Config file extension is not .yaml or .yml: {config_path}")
 
         self.config_path: str = config_path
+        self.deps_only = deps_only
 
         # Step 1: Load basic config to get FSDB file path
         self.yaml_builder = YamlBuilder()
         raw_config = self.yaml_builder.load_config(config_path)
 
-        # Step 2: Initialize FsdbBuilder and get signal hierarchy
+        # Step 2: Extract config parameters
         self.verbose: bool = raw_config["output"]["verbose"]
         self.timeout: int = raw_config["output"]["timeout"]
         self.fsdb_file = Path(raw_config["fsdbFile"])
         self.output_dir = Path(raw_config["output"]["directory"])
-        self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
 
-        # Get all available signals from FSDB
-        # all_signals = self.fsdb_builder.get_signals_index()
+        # Step 3: Initialize FsdbBuilder only if not in deps-only mode
+        if not deps_only:
+            self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
+        else:
+            # In deps-only mode, skip FSDB initialization
+            self.fsdb_builder = None
 
-        # Step 3: Pass signal info to YamlBuilder for validation and resolution
+        # Step 4: Pass signal info to YamlBuilder for validation and resolution
         self.config: dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
 
         self.clock_signal: str = self.config["clockSignal"]
@@ -442,9 +446,15 @@ class FsdbAnalyzer:
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
-        # Build execution order based on dependencies
+        # Build execution order based on dependencies (always needed for graph export)
         tasks : list[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
+
+        # Early exit for deps-only mode after graph is generated
+        if self.deps_only:
+            print("[INFO] Dependency graph generated. Exiting deps-only mode without FSDB analysis.")
+            return
+
         # Collect all signals-of-interest from all tasks using YamlBuilder
         soi = self.yaml_builder.collect_raw_signals(self.global_scope)
         self.fsdb_builder.dump_signals(soi)
@@ -507,9 +517,15 @@ Examples:
         help="YAML configuration file path"
     )
 
+    parser.add_argument(
+        "--deps-only",
+        action="store_true",
+        help="Only generate dependency graph and exit (skip FSDB analysis)",
+    )
+
     args = parser.parse_args()
 
-    analyzer = FsdbAnalyzer(args.config)
+    analyzer = FsdbAnalyzer(args.config, deps_only=args.deps_only)
     analyzer.run()
 
 

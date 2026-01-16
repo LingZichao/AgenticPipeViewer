@@ -474,50 +474,120 @@ class YamlBuilder:
         self, output_file: str, output_dir: Path, task_execution_order: List[int]
     ) -> None:
         """Export task dependency graph to image file"""
-        try:
-            from graphviz import Digraph
-        except ImportError:
-            print("[WARN] graphviz not installed. Skip dependency graph export.")
-            print("[WARN] Install with: pip install graphviz")
-            return
-
-        if not self.config:
-            raise RuntimeError("Config not loaded. Call load_config first.")
-
-        tasks: List[Task] = self.config["tasks"]
-
-        dot = Digraph(comment="Task Dependencies")
-        dot.attr(rankdir="LR")
-        dot.attr("node", shape="box", style="rounded,filled", fillcolor="lightblue")
-
-        for idx, task in enumerate(tasks):
-            task_id = task.id or f"task_{idx}"
-            task_display_name = task.name or task.id or f"Task {idx + 1}"
-
-            if task_execution_order and idx in task_execution_order:
-                exec_order = task_execution_order.index(idx) + 1
-                label = f"[{exec_order}] {task_display_name}\\n({task_id})"
-            else:
-                label = f"{task_display_name}\\n({task_id})"
-
-            dot.node(task_id, label)
-
-        for task in tasks:
-            task_id = task.id or f"task_{tasks.index(task)}"
-            for dep_id in task.deps:
-                dot.edge(dep_id, task_id)
-
+        # Always compute output path first
         output_path = output_dir / output_file
         file_ext = output_path.suffix.lstrip(".")
         if not file_ext:
             file_ext = "png"
             output_path = output_path.with_suffix(".png")
 
+        if not self.config:
+            raise RuntimeError("Config not loaded. Call load_config first.")
+
+        # Pure-Python NetworkX + Matplotlib implementation (no system 'dot' needed)
+        self._export_deps_graph_matplotlib(output_path, task_execution_order)
+
+    def _export_deps_graph_matplotlib(
+        self, output_path: Path, task_execution_order: List[int]
+    ) -> None:
+        """Pure-Python fallback using NetworkX + Matplotlib.
+
+        Produces PNG/PDF/SVG without requiring Graphviz 'dot'."""
         try:
-            dot.render(str(output_path.with_suffix("")), format=file_ext, cleanup=True)
-            print(f"[INFO] Dependency graph exported to: {output_path}")
+            import matplotlib
+            matplotlib.use("Agg")  # Headless backend for servers/CI
+            import matplotlib.pyplot as plt
+            import networkx as nx
+        except ImportError as e:
+            print(
+                f"[WARN] Matplotlib/NetworkX not installed ({e}). Skip dependency graph export."
+            )
+            print("[WARN] Install with: pip install networkx matplotlib")
+            return
+
+        if not self.config:
+            raise RuntimeError("Config not loaded. Call load_config first.")
+
+        tasks: List[Task] = self.config["tasks"]
+        G = nx.DiGraph()
+
+        # Build nodes with labels (include execution order when available)
+        for idx, task in enumerate(tasks):
+            task_id = task.id or f"task_{idx}"
+            task_display_name = task.name or task.id or f"Task {idx + 1}"
+            if task_execution_order and idx in task_execution_order:
+                exec_order = task_execution_order.index(idx) + 1
+                label = f"[{exec_order}] {task_display_name}\n({task_id})"
+            else:
+                label = f"{task_display_name}\n({task_id})"
+            G.add_node(task_id, label=label)
+
+        # Build edges from dependencies
+        for task in tasks:
+            src_id = task.id or f"task_{tasks.index(task)}"
+            for dep_id in task.deps:
+                G.add_edge(dep_id, src_id)
+
+        # Layout: deterministic left-to-right DAG layers without Graphviz
+        if task_execution_order:
+            topo_nodes = [
+                tasks[i].id or f"task_{i}"
+                for i in task_execution_order
+                if (tasks[i].id or f"task_{i}") in G
+            ]
+        else:
+            topo_nodes = list(nx.topological_sort(G))
+
+        level: dict[str, int] = {n: 0 for n in G.nodes}
+        for node in topo_nodes:
+            preds = list(G.predecessors(node))
+            if preds:
+                level[node] = max(level[p] + 1 for p in preds)
+
+        order_rank = {node: idx for idx, node in enumerate(topo_nodes)}
+        levels: dict[int, list[str]] = {}
+        for node, lvl in level.items():
+            levels.setdefault(lvl, []).append(node)
+
+        pos: dict[str, tuple[float, float]] = {}
+        x_spacing, y_spacing = 3.0, 1.6
+        for lvl in sorted(levels.keys()):
+            nodes = sorted(levels[lvl], key=lambda n: order_rank.get(n, 0))
+            for idx, node in enumerate(nodes):
+                pos[node] = (lvl * x_spacing, -idx * y_spacing)
+
+        # Draw nodes and edges
+        fig, ax = plt.subplots(figsize=(max(6, len(G.nodes) * 0.8), max(4, len(G.nodes) * 0.6)))
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_size=1800,
+            node_color="#ADD8E6",
+            node_shape="s",
+            ax=ax,
+        )
+        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="-|>", arrowsize=16, width=1.8, ax=ax)
+
+        # Labels
+        labels = {n: G.nodes[n].get("label", n) for n in G.nodes}
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=9, ax=ax)
+
+        ax.set_axis_off()
+
+        # Save figure based on extension
+        ext = output_path.suffix.lstrip(".").lower()
+        if ext not in {"png", "pdf", "svg"}:
+            # Default to PNG if unsupported extension
+            output_path = output_path.with_suffix(".png")
+
+        try:
+            plt.tight_layout()
+            fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[INFO] Dependency graph exported (matplotlib) to: {output_path}")
         except Exception as e:
-            print(f"[WARN] Failed to export dependency graph: {e}")
+            plt.close(fig)
+            print(f"[WARN] Failed to export dependency graph via matplotlib: {e}")
 
     def format_log(
         self,
