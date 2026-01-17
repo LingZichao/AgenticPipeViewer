@@ -25,7 +25,7 @@ class Condition:
 class ExpressionEvaluator(ast.NodeVisitor):
     """AST-based expression evaluator with custom operator support"""
 
-    def __init__(self, scope: str, runtime_data: dict[str, Any]):
+    def __init__(self, scope: str, runtime_data: Dict[str, Any]):
         self.scope = scope
         self.signal_values = runtime_data.get("signal_values", {})
         self.upstream_row = runtime_data.get("upstream_row", {})
@@ -315,14 +315,16 @@ class ConditionParser:
         """Recursively visit AST nodes to collect signals"""
         if isinstance(node, ast.Name):
             self._collect_name(node)
+        elif isinstance(node, ast.Attribute):
+            self._collect_attribute(node)
         elif isinstance(node, ast.Subscript):
             self._collect_subscript(node)
         elif isinstance(node, ast.Call):
             self._collect_call(node)
-
-        # Recursively visit children
-        for child in ast.iter_child_nodes(node):
-            self._visit_ast(child)
+        else:
+            # Recursively visit children for other node types
+            for child in ast.iter_child_nodes(node):
+                self._visit_ast(child)
 
     def _collect_name(self, node: ast.Name) -> None:
         """Collect signal from Name node"""
@@ -331,6 +333,16 @@ class ConditionParser:
         if name not in ["True", "False", "None"] and not name.startswith("_"):
             try:
                 resolved = resolve_signal_path(name, self.scope)
+                self.signals.add(resolved)
+            except (ValueError, RuntimeError):
+                pass
+
+    def _collect_attribute(self, node: ast.Attribute) -> None:
+        """Collect signal from Attribute node (e.g., module.signal)"""
+        signal_name = self._get_name(node)
+        if signal_name and not signal_name.startswith("_"):
+            try:
+                resolved = resolve_signal_path(signal_name, self.scope)
                 self.signals.add(resolved)
             except (ValueError, RuntimeError):
                 pass
@@ -408,7 +420,7 @@ class ConditionBuilder:
 
     def _compute_pattern_candidates(
         self,
-        patterns: list[str],
+        patterns: List[str],
         var_name: str,
         scope: str,
         fsdb_builder: "FsdbBuilder",
@@ -453,7 +465,7 @@ class ConditionBuilder:
 
         if not has_pattern:
             # Simple condition: direct evaluation
-            def evaluator(runtime_data: dict[str, Any]) -> bool:
+            def evaluator(runtime_data: Dict[str, Any]) -> bool:
                 expr_eval = ExpressionEvaluator(scope, runtime_data)
                 return bool(expr_eval.eval(raw_expr))
 
@@ -464,7 +476,7 @@ class ConditionBuilder:
         assert patterns is not None, "patterns required for pattern conditions"
         assert candidates is not None, "candidates required for pattern conditions"
 
-        def evaluator(runtime_data: dict[str, Any]) -> bool:
+        def evaluator(runtime_data: Dict[str, Any]) -> bool:
             def test_value(val: str) -> bool:
                 # Substitute pattern variable with candidate value
                 test_expr = raw_expr
@@ -499,7 +511,7 @@ class ConditionBuilder:
 
         return evaluator
 
-    def exec(self, condition: Condition, runtime_data: dict[str, Any]) -> bool:
+    def exec(self, condition: Condition, runtime_data: Dict[str, Any]) -> bool:
         """Execute condition with runtime data"""
         try:
             return condition.evaluator(runtime_data)

@@ -21,14 +21,14 @@ class Task:
     scope: Optional[str] = None
     deps: List[str] = field(default_factory=list)
     logging: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     condition: Optional[Condition] = None  # Built Condition object, set later
     match_mode: str = "all"  # Matching mode: "first", "all", "unique_per_var"
     max_match: int = 0  # Maximum matches per upstream trigger (0 = unlimited)
 
     @classmethod
     def from_dict(
-        cls, data: dict[str, Any], global_scope: str, yaml_builder: "YamlBuilder"
+        cls, data: Dict[str, Any], global_scope: str, yaml_builder: "YamlBuilder"
     ) -> "Task":
         """Create Task from dictionary with all preprocessing"""
         task_scope = data.get("scope", "")
@@ -80,9 +80,9 @@ class Task:
             max_match=max_match,
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert Task to dictionary"""
-        result: dict[str, Any] = {
+        result: Dict[str, Any] = {
             "capture": self.capture,
             "dependsOn": self.deps,
             "condition": self.raw_condition,
@@ -102,12 +102,12 @@ class YamlBuilder:
     """YAML configuration loader and validator"""
 
     def __init__(self) -> None:
-        self.line_map: dict[str, int] = {}
+        self.line_map: Dict[str, int] = {}
         self.config: Optional[dict[str, Any]] = None
         self.output_dir: Optional[Path] = None
         self._tasks_resolved: bool = False
 
-    def load_config(self, config_path: str) -> dict[str, Any]:
+    def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
         self._extract_line_numbers(config_path)
 
@@ -126,7 +126,7 @@ class YamlBuilder:
         self._validate_config(config, config_path)
         return config
 
-    def _validate_config(self, config: dict[str, Any], config_path: str) -> None:
+    def _validate_config(self, config: Dict[str, Any], config_path: str) -> None:
         """Validate configuration structure"""
         if "fsdbFile" not in config:
             line_info = self._get_line_info("fsdbFile")
@@ -185,8 +185,8 @@ class YamlBuilder:
         self.config = config
 
     def resolve_config(
-        self, config: dict[str, Any]
-    ) -> dict[str, Any]:
+        self, config: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Resolve config by converting dict tasks to Task objects
 
         Args:
@@ -265,7 +265,7 @@ class YamlBuilder:
             return " ".join(line.strip() for line in logging if line.strip())
         return str(logging)
 
-    def _validate_task(self, task: dict[str, Any], task_num: int) -> None:
+    def _validate_task(self, task: Dict[str, Any], task_num: int) -> None:
         """Validate task configuration"""
         line_info = self._get_line_info(f"tasks[{task_num - 1}]")
 
@@ -355,9 +355,9 @@ class YamlBuilder:
                             f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
                         )
 
-    def _validate_dependencies(self, tasks: list[dict[str, Any]]) -> None:
+    def _validate_dependencies(self, tasks: List[dict[str, Any]]) -> None:
         """Validate task dependency graph and detect cycles"""
-        task_map: dict[str, int] = {}
+        task_map: Dict[str, int] = {}
         for idx, task in enumerate(tasks):
             task_id = task.get("id")
             if not task_id:
@@ -377,7 +377,7 @@ class YamlBuilder:
         visited: set[int] = set()
         rec_stack: set[int] = set()
 
-        def has_cycle(task_idx: int, path: list[str]) -> bool:
+        def has_cycle(task_idx: int, path: List[str]) -> bool:
             visited.add(task_idx)
             rec_stack.add(task_idx)
             path.append(tasks[task_idx].get("id", f"task_{task_idx}"))
@@ -538,18 +538,18 @@ class YamlBuilder:
         else:
             topo_nodes = list(nx.topological_sort(G))
 
-        level: dict[str, int] = {n: 0 for n in G.nodes}
+        level: Dict[str, int] = {n: 0 for n in G.nodes}
         for node in topo_nodes:
             preds = list(G.predecessors(node))
             if preds:
                 level[node] = max(level[p] + 1 for p in preds)
 
         order_rank = {node: idx for idx, node in enumerate(topo_nodes)}
-        levels: dict[int, list[str]] = {}
+        levels: Dict[int, list[str]] = {}
         for node, lvl in level.items():
             levels.setdefault(lvl, []).append(node)
 
-        pos: dict[str, tuple[float, float]] = {}
+        pos: Dict[str, tuple[float, float]] = {}
         x_spacing, y_spacing = 3.0, 1.6
         for lvl in sorted(levels.keys()):
             nodes = sorted(levels[lvl], key=lambda n: order_rank.get(n, 0))
@@ -592,8 +592,8 @@ class YamlBuilder:
     def format_log(
         self,
         log_format: str,
-        row_data: dict[str, Any],
-        capture_signals: list[str],
+        row_data: Dict[str, Any],
+        capture_signals: List[str],
         row_idx: int,
     ) -> str:
         """Format log message for matched row
@@ -607,7 +607,7 @@ class YamlBuilder:
         Returns:
             Formatted log message string
         """
-        context: dict[str, Any] = {"__time__": row_idx}
+        context: Dict[str, Any] = {"__time__": row_idx}
         for sig in capture_signals:
             sig_name = sig.split(".")[-1].split("/")[-1]
             val_str = row_data["capd"].get(sig, "0")
@@ -625,7 +625,7 @@ class YamlBuilder:
 
     def resolve_capture_signals(
         self, capture_signals: List[Any], scope: str
-    ) -> list[str]:
+    ) -> List[str]:
         """Resolve capture signal paths with scope support
 
         Args:
@@ -635,7 +635,7 @@ class YamlBuilder:
         Returns:
             List of resolved signal paths (patterns preserved)
         """
-        resolved_signals: list[str] = []
+        resolved_signals: List[str] = []
         for sig in capture_signals:
             if isinstance(sig, str):
                 # Always resolve with scope, even if it contains {var} pattern
@@ -646,7 +646,7 @@ class YamlBuilder:
         return resolved_signals
 
     def resolve_dep_references(
-        self, value: Any, task_id: str, task_data: dict[str, Any]
+        self, value: Any, task_id: str, task_data: Dict[str, Any]
     ) -> Any:
         """Resolve $dep.task_id.signal references to actual values
 

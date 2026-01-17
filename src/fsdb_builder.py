@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import subprocess
-import os
 import re
 from pathlib import Path
 from typing import List, Dict
@@ -19,6 +18,7 @@ class FsdbBuilder:
         self.all_signals_list: List[str] = []
         self.signal_name_map: Dict[str, str] = {}  # Normalized name -> FSDB name with bitwidth
         self.timestamps: List[int] = []  # FSDB timestamps in 100fs units
+        self._signal_vidcode_map: Dict[str, int] = {}  # signal_name -> vidcode
 
     def to_fsdb_path(self, signal: str) -> str:
         """Convert signal path from dot notation to FSDB format (slash)"""
@@ -26,10 +26,10 @@ class FsdbBuilder:
             return signal
         return '/' + signal.replace('.', '/')
 
-    def get_signals_index(self) -> List[str]:
-        """Get all signals from FSDB using fsdbdebug"""
+    def get_signals_index(self) -> Dict[str, int]:
+        """Get all signals from FSDB using fsdbdebug, returns signal_name -> vidcode mapping"""
         if self.all_signals_list:
-            return self.all_signals_list
+            return {sig: self._signal_vidcode_map.get(sig, -1) for sig in self.all_signals_list}
 
         cmd = ['fsdbdebug', '-hier_tree', str(self.fsdb_file.absolute())]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -40,30 +40,38 @@ class FsdbBuilder:
         # fsdbdebug outputs to stderr, not stdout
         output = result.stderr if result.stderr else result.stdout
         signals = []
+
         for line in output.split('\n'):
             line = line.strip()
             if not line.startswith('Var:'):
                 continue
 
-            # Extract signal name and width from format: Var: type name l:left r:right ...
+            # Extract signal name, width, and vidcode from format:
+            # Var: type name[bits] l:left r:right ... vidcode ...
             parts = line.split()
             if len(parts) < 4:
                 continue
             sig_name = parts[2]
-            # Find l: and r: values
-            left, right = None, None
-            for part in parts:
+
+            # Find l:, r: values and vidcode (last integer before 1B)
+            left, right, vidcode = None, None, None
+            for i, part in enumerate(parts):
                 if part.startswith('l:'):
                     left = int(part[2:])
                 elif part.startswith('r:'):
                     right = int(part[2:])
+                elif i > 3 and part.isdigit() and i + 1 < len(parts) and parts[i + 1] in ('1B', '0'):
+                    vidcode = int(part)
 
             if left is not None and right is not None:
                 self.signal_widths[sig_name] = (left, right)
+            if vidcode is not None:
+                self._signal_vidcode_map[sig_name] = vidcode
+
             signals.append(sig_name)
 
         self.all_signals_list = signals
-        return signals
+        return {sig: self._signal_vidcode_map.get(sig, -1) for sig in signals}
 
     def get_signal(self, signal: str) -> List[str]:
         """Get cached signal values"""
@@ -116,7 +124,7 @@ class FsdbBuilder:
         return expanded
 
     def dump_signals(self, signals: List[str]) -> None:
-        """Dump all signals at once using single fsdbreport call"""
+        """Dump all signals using fsdbdebug -vc -vidcode"""
         if not signals:
             return
 
@@ -132,66 +140,129 @@ class FsdbBuilder:
             normalized = normalize_signal_name(sig)
             self.signal_name_map[normalized] = sig
 
-        fsdb_paths = [self.to_fsdb_path(sig) for sig in matched_signals]
+        # Get vidcode mapping
+        vidcode_map = self.get_signals_index()
 
-        tmp_file = self.output_dir / '.fsdb_dump_tmp.txt'
+        print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB using fsdbdebug...")
 
-        try:
-            cmd = ['fsdbreport', str(self.fsdb_file.absolute()), '-of', 'h', '-w', '1024', '-s'] + fsdb_paths + ['-o', tmp_file]
+        # Initialize cache and timestamps
+        for sig in matched_signals:
+            normalized = normalize_signal_name(sig)
+            self.signal_cache[normalized] = []
+        self.timestamps = []
 
-            print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB...")
+        # Extract value changes for each signal
+        all_vc_data: Dict[str, Dict[int, str]] = {}  # normalized_sig -> {time_idx: value}
+        time_set = set()
+
+        # First pass: check all signals have vidcode
+        missing_signals = []
+        for sig in matched_signals:
+            vidcode = vidcode_map.get(sig, -1)
+            if vidcode == -1:
+                missing_signals.append(sig)
+
+        if missing_signals:
+            error_msg = "[ERROR] The following signals do not exist in FSDB:\n"
+            for sig in missing_signals:
+                error_msg += f"  - {sig}\n"
+            error_msg += "\nPlease check your YAML configuration for typos or incorrect signal names."
+            raise RuntimeError(error_msg)
+
+        # Second pass: extract value changes
+        for sig in matched_signals:
+            normalized = normalize_signal_name(sig)
+            vidcode = vidcode_map.get(sig, -1)
+
+            cmd = ['fsdbdebug', '-vc', '-vidcode', str(vidcode), str(self.fsdb_file.absolute())]
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   universal_newlines=True, timeout=120)
+
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to dump signals: {result.stderr}")
+                print(f"[WARN] Failed to dump signal {sig}: {result.stderr}")
+                continue
 
-            with open(tmp_file, 'r') as f:
-                lines = f.readlines()
+            # Parse output: "N vc: xtag: (0 time)  val: binary_value"
+            output = result.stderr if result.stderr else result.stdout
+            vc_data = {}
 
-            if self.verbose and self.output_dir:
-                output_file = self.output_dir / 'fsdb_dump.txt'
-                with open(output_file, 'w') as f:
-                    f.writelines(lines)
-
-            header_idx = -1
-            for i, line in enumerate(lines):
-                if 'Time' in line:
-                    header_idx = i
-                    break
-
-            if header_idx == -1:
-                raise RuntimeError("Cannot find header in fsdbreport output")
-
-            # Initialize cache for original signal names (without bit ranges)
-            for sig in matched_signals:
-                normalized = normalize_signal_name(sig)
-                self.signal_cache[normalized] = []
-
-            self.timestamps = []  # Reset timestamps
-
-            data_start = header_idx + 2
-
-            for line in lines[data_start:]:
-                if not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) < 2:
+            for line in output.split('\n'):
+                if 'vc:' not in line or 'xtag:' not in line or 'val:' not in line:
                     continue
 
-                # Store timestamp from first column
-                try:
-                    timestamp = int(parts[0])
-                    self.timestamps.append(timestamp)
-                except ValueError:
-                    continue
+                # Parse: "N vc: xtag: (0 time)  val: binary_value"
+                match = re.search(r'xtag:\s*\(\s*\d+\s+(\d+)\)\s+val:\s*([01xzXZ]+)', line)
+                if match:
+                    time_val = int(match.group(1))
+                    binary_val = match.group(2)
+                    # Convert binary to hex
+                    hex_val = self._binary_to_hex(binary_val)
+                    vc_data[time_val] = hex_val
+                    time_set.add(time_val)
 
-                # Store signal values (parts[1:])
-                for idx, val in enumerate(parts[1:]):
-                    if idx < len(matched_signals):
-                        normalized = normalize_signal_name(matched_signals[idx])
-                        self.signal_cache[normalized].append(val)
+            all_vc_data[normalized] = vc_data
 
-        finally:
-            if not self.verbose and os.path.exists(tmp_file):
-                os.unlink(tmp_file)
+        # Build unified time series
+        self.timestamps = sorted(list(time_set))
+
+        # Fill signal cache with values at each timestamp (forward-fill)
+        for sig in matched_signals:
+            normalized = normalize_signal_name(sig)
+            vc_data = all_vc_data.get(normalized, {})
+
+            current_val = '0'  # Default initial value
+            for time in self.timestamps:
+                if time in vc_data:
+                    current_val = vc_data[time]
+                self.signal_cache[normalized].append(current_val)
+
+        # Write verbose output if enabled
+        if self.verbose and self.output_dir:
+            self._write_verbose_output(matched_signals)
+
+    def _write_verbose_output(self, signals: List[str]) -> None:
+        """Write signal dump to file in verbose mode"""
+        output_file = self.output_dir / 'fsdb_dump.txt'
+        try:
+            with open(output_file, 'w') as f:
+                # Write header
+                header = "Time".ljust(15)
+                for sig in signals:
+                    sig_name = sig.split('.')[-1].split('/')[-1]
+                    header += sig_name[:20].ljust(22)
+                f.write(header + '\n')
+                f.write('-' * len(header) + '\n')
+
+                # Write data rows
+                for idx, time in enumerate(self.timestamps):
+                    row = str(time).ljust(15)
+                    for sig in signals:
+                        normalized = normalize_signal_name(sig)
+                        if normalized in self.signal_cache:
+                            val = self.signal_cache[normalized][idx] if idx < len(self.signal_cache[normalized]) else '0'
+                            row += val[:20].ljust(22)
+                        else:
+                            row += '0'.ljust(22)
+                    f.write(row + '\n')
+
+            print(f"[INFO] Verbose dump written to: {output_file}")
+        except Exception as e:
+            print(f"[WARN] Failed to write verbose output: {e}")
+
+    def _binary_to_hex(self, binary_str: str) -> str:
+        """Convert binary string to hex string (without 0x prefix)"""
+        # Handle x/z values
+        if 'x' in binary_str.lower() or 'z' in binary_str.lower():
+            # Return as-is for x/z values
+            return '*' + binary_str[:8] if len(binary_str) > 8 else '*' + binary_str
+
+        try:
+            # Pad to multiple of 4 bits
+            padding = (4 - len(binary_str) % 4) % 4
+            binary_str = '0' * padding + binary_str
+            # Convert to hex
+            hex_val = hex(int(binary_str, 2))[2:]  # Remove '0x'
+            return hex_val.upper()
+        except ValueError:
+            return '0'
 

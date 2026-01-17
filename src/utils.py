@@ -66,7 +66,7 @@ def resolve_signal_path(signal: str, scope: str) -> str:
     return signal
 
 
-def split_signal(signal_val: str, num_parts: int, bit_width: int = 0) -> list[int]:
+def split_signal(signal_val: str, num_parts: int, bit_width: int = 0) -> List[int]:
     """Split a wide signal value into equal parts
 
     Args:
@@ -109,13 +109,13 @@ def normalize_signal_name(signal: str) -> str:
     return re.sub(r'\[\d+:\d+\]$', '', signal)
 
 
-def verilog_to_int(match: re.Match[str]) -> str:
+def verilog_to_int(match) -> str:
     parts = match.group(0).split("'")
     base_map = {'b': 2, 'o': 8, 'd': 10, 'h': 16}
     base = base_map.get(parts[1][0].lower(), 10)
     return str(int(parts[1][1:].replace('_', ''), base))
 
-def match_signal_with_bitwidth(signal: str, available_signals: list[str]) -> str:
+def match_signal_with_bitwidth(signal: str, available_signals: List[str]) -> str:
     """Match a signal name with its FSDB representation (may include bit range)
 
     Args:
