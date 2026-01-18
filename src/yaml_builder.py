@@ -2,7 +2,7 @@
 import yaml
 import re
 from pathlib import Path
-from typing import Union, Any, List, Optional, Dict
+from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
 from utils import resolve_signal_path
 from condition_builder import Condition
@@ -103,7 +103,7 @@ class YamlBuilder:
 
     def __init__(self) -> None:
         self.line_map: Dict[str, int] = {}
-        self.config: Optional[dict[str, Any]] = None
+        self.config: Optional[Dict[str, Any]] = None
         self.output_dir: Optional[Path] = None
         self._tasks_resolved: bool = False
 
@@ -148,6 +148,18 @@ class YamlBuilder:
         config.setdefault("globalClock", "clk")
         config.setdefault("scope", "")
 
+        # Validate globalFlush configuration (optional)
+        if "globalFlush" in config:
+            flush_config = config["globalFlush"]
+            if not isinstance(flush_config, dict):
+                raise ValueError("[ERROR] globalFlush must be a dict")
+
+            if "condition" not in flush_config:
+                raise ValueError("[ERROR] globalFlush.condition is required")
+
+            if not isinstance(flush_config["condition"], list):
+                raise ValueError("[ERROR] globalFlush.condition must be a list")
+
         if "output" not in config:
             config["output"] = {}
         config["output"].setdefault("directory", "temp_reports")
@@ -184,16 +196,8 @@ class YamlBuilder:
         self._validate_dependencies(config["tasks"])
         self.config = config
 
-    def resolve_config(
-        self, config: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Resolve config by converting dict tasks to Task objects
-
-        Args:
-            config: Raw config dictionary
-            cond_builder: Optional ConditionBuilder instance
-            all_signals: Optional list of all available signals from FSDB
-        """
+    def resolve_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve config by converting dict tasks to Task objects"""
         self.config = config
 
         # Convert dict tasks to Task objects
@@ -205,6 +209,7 @@ class YamlBuilder:
 
         config["tasks"] = task_objects
         self._tasks_resolved = True
+
         return config
 
     def collect_raw_signals(self, global_scope: str) -> List[str]:
@@ -223,8 +228,8 @@ class YamlBuilder:
 
         from condition_builder import ConditionBuilder
 
-        all_signals: set[str] = set()
-        tasks: List[Union[dict[str, Any], Task]] = self.config.get("tasks", [])
+        all_signals: Set[str] = set()
+        tasks: List[Union[Dict[str, Any], Task]] = self.config.get("tasks", [])
 
         for task in tasks:
             if isinstance(task, Task):
@@ -243,13 +248,22 @@ class YamlBuilder:
             else:
                 raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
 
+        # Collect globalFlush condition signals
+        if "globalFlush" in self.config:
+            flush_condition = self.config["globalFlush"]["condition"]
+            flush_signals = ConditionBuilder.collect_signals(
+                flush_condition,
+                self.config.get("scope", "")
+            )
+            all_signals.update(flush_signals)
+
         return list(all_signals)
 
     def _resolve_signal_path(self, signal: str, scope: str) -> str:
         """Resolve signal path with scope support (delegates to utils)"""
         return resolve_signal_path(signal, scope)
 
-    def _normalize_condition(self, condition: Union[str, list[str]]) -> str:
+    def _normalize_condition(self, condition: Union[str, List[str]]) -> str:
         """Normalize condition to single Python expression string"""
         if isinstance(condition, str):
             return condition.strip()
@@ -257,7 +271,7 @@ class YamlBuilder:
             return " ".join(line.strip() for line in condition if line.strip())
         return str(condition)
 
-    def _normalize_logging(self, logging: Union[str, list[str]]) -> str:
+    def _normalize_logging(self, logging: Union[str, List[str]]) -> str:
         """Normalize logging to single format string"""
         if isinstance(logging, str):
             return logging.strip()
@@ -355,7 +369,7 @@ class YamlBuilder:
                             f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
                         )
 
-    def _validate_dependencies(self, tasks: List[dict[str, Any]]) -> None:
+    def _validate_dependencies(self, tasks: List[Dict[str, Any]]) -> None:
         """Validate task dependency graph and detect cycles"""
         task_map: Dict[str, int] = {}
         for idx, task in enumerate(tasks):
@@ -374,8 +388,8 @@ class YamlBuilder:
                         f"[ERROR] Task '{task_display_name}' depends on non-existent task '{dep_id}'"
                     )
 
-        visited: set[int] = set()
-        rec_stack: set[int] = set()
+        visited: Set[int] = set()
+        rec_stack: Set[int] = set()
 
         def has_cycle(task_idx: int, path: List[str]) -> bool:
             visited.add(task_idx)
@@ -545,11 +559,11 @@ class YamlBuilder:
                 level[node] = max(level[p] + 1 for p in preds)
 
         order_rank = {node: idx for idx, node in enumerate(topo_nodes)}
-        levels: Dict[int, list[str]] = {}
+        levels: Dict[int, List[str]] = {}
         for node, lvl in level.items():
             levels.setdefault(lvl, []).append(node)
 
-        pos: Dict[str, tuple[float, float]] = {}
+        pos: Dict[str, Tuple[float, float]] = {}
         x_spacing, y_spacing = 3.0, 1.6
         for lvl in sorted(levels.keys()):
             nodes = sorted(levels[lvl], key=lambda n: order_rank.get(n, 0))

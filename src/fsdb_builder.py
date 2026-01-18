@@ -2,7 +2,7 @@
 import subprocess
 import re
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from utils import resolve_signal_path, normalize_signal_name
 
 
@@ -14,7 +14,7 @@ class FsdbBuilder:
         self.verbose: bool = verbose
         self.output_dir: Path = output_dir
         self.signal_cache: Dict[str, List[str]] = {}  # Normalized name -> values
-        self.signal_widths: Dict[str, tuple[int, int]] = {}
+        self.signal_widths: Dict[str, Tuple[int, int]] = {}
         self.all_signals_list: List[str] = []
         self.signal_name_map: Dict[str, str] = {}  # Normalized name -> FSDB name with bitwidth
         self.timestamps: List[int] = []  # FSDB timestamps in 100fs units

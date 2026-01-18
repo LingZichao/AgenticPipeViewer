@@ -2,10 +2,10 @@
 import argparse
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 from yaml_builder import YamlBuilder, Task
 from fsdb_builder import FsdbBuilder
-from condition_builder import ConditionBuilder
+from condition_builder import ConditionBuilder, Condition
 from utils import resolve_signal_path, normalize_signal_name
 
 
@@ -34,29 +34,35 @@ class FsdbAnalyzer:
         self.fsdb_file = Path(raw_config["fsdbFile"])
         self.output_dir = Path(raw_config["output"]["directory"])
 
-        # Step 3: Initialize FsdbBuilder only if not in deps-only mode
+        # Step 3: Initialize ConditionBuilder before resolving config
+        self.cond_builder = ConditionBuilder()
+
+        # Step 4: Initialize FsdbBuilder only if not in deps-only mode
         if not deps_only:
             self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
         else:
             # In deps-only mode, skip FSDB initialization
             self.fsdb_builder = None
 
-        # Step 4: Pass signal info to YamlBuilder for validation and resolution
-        self.config: dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
+        # Step 5: Resolve config (convert dict tasks to Task objects)
+        self.config: Dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
 
         self.clock_signal: str = self.config["globalClock"]
         self.global_scope: str = self.config["scope"]
-        self.runtime_data: dict[str, Any] = {}
-        self.cond_builder = ConditionBuilder()
+        self.runtime_data: Dict[str, Any] = {}
+
+        # Global flush support (will be compiled after signals are dumped)
+        self.gflush_condition: Optional[Condition] = None
+        self.flush_boundaries: List[int] = []
 
         # Trace lifecycle tracking
-        self.trace_lifecycle: dict[int, list[dict[str, Any]]] = {}  # trace_id -> list of events
+        self.trace_lifecycle: Dict[int, List[Dict[str, Any]]] = {}  # trace_id -> list of events
 
     def _record_trace_event(
         self,
         trace_id: int,
         task: Task,
-        row_data: dict[str, Any],
+        row_data: Dict[str, Any],
         event_type: str = "match",
     ) -> None:
         """Record a trace lifecycle event
@@ -84,8 +90,8 @@ class FsdbAnalyzer:
         self.trace_lifecycle[trace_id].append(event)
 
     def _expand_templates(
-        self, templates: list[str], vars: dict[str, str], scope: str
-    ) -> list[str]:
+        self, templates: List[str], vars: Dict[str, str], scope: str
+    ) -> List[str]:
         """Expand signal templates with resolved variables after condition evaluation"""
         signals = []
         for tmpl in templates:
@@ -99,7 +105,7 @@ class FsdbAnalyzer:
                 signals.append(tmpl)
         return signals
 
-    def _trace_trigger(self, task: Task) -> list[dict[str, Any]]:
+    def _trace_trigger(self, task: Task) -> List[Dict[str, Any]]:
         """Trigger mode: match conditions globally, each match starts new trace"""
         templates = task.capture
         print(f"Evaluating condition for {len(templates)} signal(s)")
@@ -200,7 +206,7 @@ class FsdbAnalyzer:
 
         return matched_rows
 
-    def _trace_depends(self, task: Task) -> list[dict[str, Any]]:
+    def _trace_depends(self, task: Task) -> List[Dict[str, Any]]:
         """Trace mode: match from upstream with trace fork support
 
         Supports three matching modes via task.match_mode:
@@ -291,10 +297,22 @@ class FsdbAnalyzer:
                 print(f"  Trace {upstream_trace_id} (path={upstream_fork_path}): searching from row {start_row_idx} (time={start_time})")
 
             fork_id = 0
-            seen_vars: set[tuple[tuple[str, str], ...]] = set()  # For unique_per_var mode
+            seen_vars: Set[Tuple[Tuple[str, str], ...]] = set()  # For unique_per_var mode
+
+            # Record starting flush region
+            start_region = self._get_flush_region(start_time) if self.flush_boundaries else -1
 
             for row_idx in range(start_row_idx, len(timestamps)):
                 current_time = timestamps[row_idx]
+
+                # Check flush region boundary
+                if self.flush_boundaries:
+                    current_region = self._get_flush_region(current_time)
+                    if current_region != start_region:
+                        if self.verbose:
+                            print(f"    [T={start_time}] Trace terminated at T={current_time}: "
+                                  f"crossed flush boundary (region {start_region}→{current_region})")
+                        break
 
                 # Check time window limit
                 if current_time > start_time + timeout:
@@ -435,12 +453,12 @@ class FsdbAnalyzer:
         row_idx: int,
         trace_id: int,
         fork_id: int,
-        upstream_fork_path: list[int],
-        vars: dict[str, str],
-        templates: list[str],
-        signal_data: dict[str, list[str]],
+        upstream_fork_path: List[int],
+        vars: Dict[str, str],
+        templates: List[str],
+        signal_data: Dict[str, List[str]],
         task: Task,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         """Build row_data with fork support
 
         Args:
@@ -459,7 +477,7 @@ class FsdbAnalyzer:
         # Expand capture templates with matched variables
         signals = self._expand_templates(templates, vars, task.scope or "")
 
-        row_data: dict[str, Any] = {
+        row_data: Dict[str, Any] = {
             "time": row_idx,
             "trace_id": trace_id,
             "fork_path": upstream_fork_path + [fork_id],
@@ -545,7 +563,7 @@ class FsdbAnalyzer:
         except Exception as e:
             print(f"[WARN] Failed to export trace lifecycle: {e}")
 
-    def _build_linear_paths(self, events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    def _build_linear_paths(self, events: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         """Build linear paths from trace events by expanding forks
 
         Each path is a complete chain from trigger to a leaf node.
@@ -560,7 +578,7 @@ class FsdbAnalyzer:
             return []
 
         # Build a tree structure: fork_path -> event
-        event_map: dict[tuple, dict[str, Any]] = {}
+        event_map: Dict[tuple, Dict[str, Any]] = {}
         for event in events:
             fork_path_tuple = tuple(event["fork_path"])
             event_map[fork_path_tuple] = event
@@ -677,17 +695,64 @@ class FsdbAnalyzer:
         print(f"Result: {len(matched_rows)} rows in memory\n")
         return f"[Memory] {len(matched_rows)} rows"
 
+    def _compute_flush_boundaries(self) -> None:
+        """Compute all global flush boundary time points"""
+        print("[INFO] Computing global flush boundaries...")
+
+        timestamps = self.fsdb_builder.get_timestamps()
+
+        for row_idx in range(len(timestamps)):
+            # Get signal values for this time point
+            signal_values = {}
+            for signal in self.fsdb_builder.signals_cache:
+                norm_signal = normalize_signal_name(signal)
+                values = self.fsdb_builder.signals_cache[signal]
+                signal_values[norm_signal] = values[row_idx] if row_idx < len(values) else "0"
+
+            runtime_data = {"signal_values": signal_values}
+
+            # Check if flush condition is satisfied
+            if self.cond_builder.exec(self.gflush_condition, runtime_data):
+                flush_time = timestamps[row_idx]
+                self.flush_boundaries.append(flush_time)
+
+                if self.verbose:
+                    # Output which signals triggered flush
+                    flush_signals = [
+                        f"{sig}={val}"
+                        for sig, val in signal_values.items()
+                        if val not in ("0", "*0")
+                    ]
+                    print(f"  Flush @ T={flush_time}: {', '.join(flush_signals[:5])}")
+
+        print(f"[INFO] Found {len(self.flush_boundaries)} flush boundaries")
+
+    def _get_flush_region(self, time: int) -> int:
+        """Return the flush region number for a given time point
+
+        Regions are numbered starting from 0. Each flush boundary increments the region.
+        """
+        region = 0
+        for boundary in self.flush_boundaries:
+            if boundary <= time:
+                region += 1
+            else:
+                break
+        return region
+
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
         # Build execution order based on dependencies (always needed for graph export)
-        tasks : list[Task] = self.config.get("tasks", [])
+        tasks : List[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
 
         # Early exit for deps-only mode after graph is generated
         if self.deps_only:
             print("[INFO] Dependency graph generated. Exiting deps-only mode without FSDB analysis.")
             return
+        if not self.fsdb_builder:
+            raise RuntimeError("[ERROR] FsdbBuilder not initialized in deps-only mode")
 
         # Collect all signals-of-interest from all tasks using YamlBuilder
         soi = self.yaml_builder.collect_raw_signals(self.global_scope)
@@ -697,6 +762,21 @@ class FsdbAnalyzer:
         for task in tasks:
             if task.condition is None:
                 task.condition = self.cond_builder.build(task, self.fsdb_builder)
+
+        # Build globalFlush condition after signals are dumped
+        if "globalFlush" in self.config:
+            flush_config = self.config["globalFlush"]
+
+            # Build condition directly from raw expression
+            self.global_flush_condition = self.cond_builder.build_raw(
+                raw_condition=flush_config["condition"],
+                scope=self.global_scope,
+                fsdb_builder=self.fsdb_builder
+            )
+            print("[INFO] Global flush condition compiled")
+
+            # Compute flush boundaries
+            self._compute_flush_boundaries()
 
         print(f"\n{'=' * 70}")
         print(f"[INFO] FSDB Analyzer - Collected {len(tasks)} task(s)")

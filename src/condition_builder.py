@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import re
 import ast
-from typing import Any, Callable, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 from dataclasses import dataclass
 from utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
 
@@ -16,7 +16,7 @@ class Condition:
 
     raw_expr: str  # Original expression string
     norm_expr: str  # Normalized expression (Python-compatible)
-    evaluator: Callable[[dict[str, Any]], bool]  # Evaluation function
+    evaluator: Callable[[Dict[str, Any]], bool]  # Evaluation function
     signals: List[str]  # Signals needed (normalized names with {*})
     has_pattern: bool  # Whether contains pattern matching {var}
     pattern_var: str = ""  # Pattern variable name if has_pattern
@@ -225,12 +225,12 @@ class ConditionParser:
 
     def __init__(self, scope: str):
         self.scope = scope
-        self.signals: set[str] = set()
+        self.signals: Set[str] = set()
         self.has_pattern = False
         self.pattern_var = ""
         self.pattern_signals: List[str] = []
 
-    def parse(self, expr: str) -> tuple[str, List[str], bool, str]:
+    def parse(self, expr: str) -> Tuple[str, List[str], bool, str]:
         """
         Parse and preprocess expression, collecting all metadata.
 
@@ -387,10 +387,27 @@ class ConditionBuilder:
         """Build a condition from task"""
         scope = task.scope or ""
         raw_expr = task.raw_condition
+        return self.build_raw(raw_expr, scope, fsdb_builder)
 
+    def build_raw(
+        self,
+        raw_condition: str,
+        scope: str,
+        fsdb_builder: "FsdbBuilder"
+    ) -> Condition:
+        """Build condition from raw expression (no Task object required)
+
+        Args:
+            raw_condition: Raw condition expression string
+            scope: Signal scope for resolution
+            fsdb_builder: FSDB builder for signal expansion
+
+        Returns:
+            Compiled Condition object
+        """
         # Parse and preprocess expression using unified parser
         parser = ConditionParser(scope)
-        norm_expr, signals, has_pattern, pattern_var = parser.parse(raw_expr)
+        norm_expr, signals, has_pattern, pattern_var = parser.parse(raw_condition)
 
         # Pre-compute pattern candidates if needed
         pattern_candidates = None
@@ -402,7 +419,7 @@ class ConditionBuilder:
         # Build unified evaluator
         evaluator = self._build_evaluator(
             scope,
-            raw_expr,
+            raw_condition,
             has_pattern,
             pattern_var,
             parser.pattern_signals if has_pattern else None,
@@ -410,7 +427,7 @@ class ConditionBuilder:
         )
 
         return Condition(
-            raw_expr=raw_expr,
+            raw_expr=raw_condition,
             norm_expr=norm_expr,
             evaluator=evaluator,
             signals=signals,
@@ -460,7 +477,7 @@ class ConditionBuilder:
         pattern_var: str,
         patterns: Optional[List[str]] = None,
         candidates: Optional[SignalGroup] = None,
-    ) -> Callable[[dict[str, Any]], bool]:
+    ) -> Callable[[Dict[str, Any]], bool]:
         """Build unified evaluator for both simple and pattern conditions"""
 
         if not has_pattern:
@@ -519,3 +536,4 @@ class ConditionBuilder:
             raise ValueError(
                 f"[ERROR] Failed to evaluate condition '{condition.raw_expr}': {e}"
             )
+
