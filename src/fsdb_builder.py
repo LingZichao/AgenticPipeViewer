@@ -174,6 +174,10 @@ class FsdbBuilder:
             normalized = normalize_signal_name(sig)
             vidcode = vidcode_map.get(sig, -1)
 
+            # Get bit width for this signal
+            left, right = self.signal_widths.get(sig, (0, 0))
+            bit_width = abs(left - right) + 1
+
             cmd = ['fsdbdebug', '-vc', '-vidcode', str(vidcode), str(self.fsdb_file.absolute())]
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   universal_newlines=True, timeout=120)
@@ -195,8 +199,8 @@ class FsdbBuilder:
                 if match:
                     time_val = int(match.group(1))
                     binary_val = match.group(2)
-                    # Convert binary to hex
-                    hex_val = self._binary_to_hex(binary_val)
+                    # Convert binary to hex with proper padding
+                    hex_val = self._binary_to_hex(binary_val, bit_width)
                     vc_data[time_val] = hex_val
                     time_set.add(time_val)
 
@@ -210,7 +214,12 @@ class FsdbBuilder:
             normalized = normalize_signal_name(sig)
             vc_data = all_vc_data.get(normalized, {})
 
-            current_val = '0'  # Default initial value
+            # Get bit width for proper initial value padding
+            left, right = self.signal_widths.get(sig, (0, 0))
+            bit_width = abs(left - right) + 1
+            hex_chars = (bit_width + 3) // 4  # Round up to nearest hex char
+            current_val = '0' * hex_chars if hex_chars > 0 else '0'  # Default padded initial value
+
             for time in self.timestamps:
                 if time in vc_data:
                     current_val = vc_data[time]
@@ -249,12 +258,27 @@ class FsdbBuilder:
         except Exception as e:
             print(f"[WARN] Failed to write verbose output: {e}")
 
-    def _binary_to_hex(self, binary_str: str) -> str:
-        """Convert binary string to hex string (without 0x prefix)"""
+    def _binary_to_hex(self, binary_str: str, bit_width: int = 0) -> str:
+        """Convert binary string to hex string (without 0x prefix)
+
+        Args:
+            binary_str: Binary string from FSDB
+            bit_width: Signal bit width for proper padding (0 = no padding)
+
+        Returns:
+            Hex string with proper zero padding based on bit width
+        """
+        # Calculate expected hex character count from bit width
+        expected_hex_chars = (bit_width + 3) // 4 if bit_width > 0 else 0
+
         # Handle x/z values
         if 'x' in binary_str.lower() or 'z' in binary_str.lower():
-            # Return as-is for x/z values
-            return '*' + binary_str[:8] if len(binary_str) > 8 else '*' + binary_str
+            # Return as-is for x/z values with padding marker
+            result = '*' + binary_str[:8] if len(binary_str) > 8 else '*' + binary_str
+            # Pad if needed
+            if expected_hex_chars > 0 and len(result) - 1 < expected_hex_chars:
+                result = '*' + binary_str.ljust(expected_hex_chars, 'x')
+            return result
 
         try:
             # Pad to multiple of 4 bits
@@ -262,7 +286,14 @@ class FsdbBuilder:
             binary_str = '0' * padding + binary_str
             # Convert to hex
             hex_val = hex(int(binary_str, 2))[2:]  # Remove '0x'
-            return hex_val.upper()
+            hex_val = hex_val.upper()
+
+            # Pad to expected length based on bit width
+            if expected_hex_chars > 0:
+                hex_val = hex_val.zfill(expected_hex_chars)
+
+            return hex_val
         except ValueError:
-            return '0'
+            # Return padded zero on error
+            return '0' * expected_hex_chars if expected_hex_chars > 0 else '0'
 

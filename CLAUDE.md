@@ -217,6 +217,50 @@ runtime_data = {
 - **Pattern normalization**: `{variable}` → `{*}` for wildcard matching
 - **Error context**: Include line numbers from YAML in validation errors
 
+## Trace Lifecycle Tracking
+
+The analyzer tracks the complete lifecycle of each trace and expands all fork branches into independent linear paths.
+
+### Data Structure
+
+- `trace_lifecycle`: Dict mapping trace_id to list of events
+- Each event contains:
+  - `type`: "trigger" (starts trace) or "match" (downstream match)
+  - `task_id`, `task_name`: Task that generated the event
+  - `time`, `fork_path`, `fork_id`: Execution context
+  - `vars`: Matched pattern variables
+  - `capd`: Captured signal values
+  - `log_msg`: Optional formatted log message
+
+### Linear Path Expansion
+
+The `_build_linear_paths()` method converts trace events into linear paths:
+1. Build event map from fork_path to event
+2. Find all leaf nodes (paths that are not prefixes of other paths)
+3. For each leaf, construct complete path from root (trigger) to leaf
+4. Returns list of paths, where each path is a complete event sequence
+
+This expansion ensures every fork branch becomes an independent, traceable path.
+
+### Output
+
+After all tasks complete, the analyzer:
+1. Prints trace lifecycle report to console via `_print_trace_lifecycle()`
+2. Exports to `{output_dir}/trace_lifecycle.txt` via `_export_trace_lifecycle()`
+
+Format shows linear paths with global numbering:
+- Path #X (Trace Y, Branch Z)
+- Each path uses symbols: ● (start), → (middle), ◆ (end)
+- No nested indentation - each path is a flat sequence
+
+### Implementation
+
+- `_record_trace_event()`: Records each match event with full context
+- Called from `_trace_trigger()` for trigger events
+- Called from `_trace_depends()` for all match modes (first/all/unique_per_var)
+- Log messages stored in event data rather than printed immediately
+- `_build_linear_paths()`: Expands fork tree into independent linear paths
+
 ## Example Workflow
 
 For a task with pattern and dependency:
@@ -224,11 +268,13 @@ For a task with pattern and dependency:
 - id: fetch
   condition: "icache_line{bank}_valid == 1"
   capture: [icache_line{bank}_data]
+  logging: "Fetch bank={bank} data={icache_line{bank}_data}"
 
 - id: decode
   dependsOn: fetch
   condition: "inst_data <@ $dep.fetch.icache_line{bank}_data.$split(4)"
   capture: [inst_opcode]
+  logging: "Decode opcode={inst_opcode}"
 ```
 
 Execution:
@@ -236,6 +282,9 @@ Execution:
 2. Expand and dump all signals from FSDB
 3. Build `fetch` condition: Pre-compute all bank indices (0, 1, 2, 3...)
 4. Execute `fetch`: For each time, test each bank, require unique match
+   - Record trigger event for each match with trace_id
 5. Store `fetch` results with captured `icache_line{bank}_data`
 6. Build `decode` condition: Split upstream data into 4 parts
 7. Execute `decode`: For each fetch match, search forward until `inst_data` is in split group
+   - Record match events linked to upstream trace_id
+8. Print trace lifecycle report showing complete path for each trace

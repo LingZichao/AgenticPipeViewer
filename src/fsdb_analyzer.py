@@ -49,6 +49,40 @@ class FsdbAnalyzer:
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder = ConditionBuilder()
 
+        # Trace lifecycle tracking
+        self.trace_lifecycle: dict[int, list[dict[str, Any]]] = {}  # trace_id -> list of events
+
+    def _record_trace_event(
+        self,
+        trace_id: int,
+        task: Task,
+        row_data: dict[str, Any],
+        event_type: str = "match",
+    ) -> None:
+        """Record a trace lifecycle event
+
+        Args:
+            trace_id: Trace identifier
+            task: Task that generated this event
+            row_data: Row data with time, fork_path, captured values
+            event_type: Type of event ("trigger", "match", "timeout", "complete")
+        """
+        if trace_id not in self.trace_lifecycle:
+            self.trace_lifecycle[trace_id] = []
+
+        event = {
+            "type": event_type,
+            "task_id": task.id,
+            "task_name": task.name or task.id,
+            "time": row_data.get("time", -1),
+            "fork_path": row_data.get("fork_path", []),
+            "fork_id": row_data.get("fork_id", -1),
+            "vars": row_data.get("vars", {}),
+            "capd": row_data.get("capd", {}),
+        }
+
+        self.trace_lifecycle[trace_id].append(event)
+
     def _expand_templates(
         self, templates: list[str], vars: dict[str, str], scope: str
     ) -> list[str]:
@@ -147,14 +181,20 @@ class FsdbAnalyzer:
                         # Signal not found in signal_data - skip silently
 
                     matched_rows.append(row_data)
+
+                    # Record trace lifecycle event (trigger starts a new trace)
+                    self._record_trace_event(trace_id, task, row_data, event_type="trigger")
+
                     trace_id += 1  # Increment trace_id for each match
 
-                    # Log if configured
+                    # Log if configured (but don't print immediately - save for trace lifecycle)
                     if task.logging:
                         log_msg = self.yaml_builder.format_log(
                             task.logging, row_data, signals, row_idx
                         )
-                        print(f"  [LOG] {log_msg}")
+                        # Store log message in trace event
+                        if trace_id - 1 in self.trace_lifecycle:
+                            self.trace_lifecycle[trace_id - 1][-1]["log_msg"] = log_msg
             except Exception as e:
                 print(f"[WARN] Error evaluating condition at row {row_idx}: {e}")
 
@@ -310,13 +350,18 @@ class FsdbAnalyzer:
                                 )
                                 matched_rows.append(row_data)
 
+                                # Record trace lifecycle event
+                                self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
+
                                 if self.verbose:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (time={current_time})")
 
                                 if log_format:
                                     signals = self._expand_templates(templates, matched_vars, task.scope or "")
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
-                                    print(f"    [LOG] {log_msg}")
+                                    # Store log message in trace event
+                                    if upstream_trace_id in self.trace_lifecycle:
+                                        self.trace_lifecycle[upstream_trace_id][-1]["log_msg"] = log_msg
 
                                 break  # Stop after first match
 
@@ -333,13 +378,18 @@ class FsdbAnalyzer:
                                 )
                                 matched_rows.append(row_data)
 
+                                # Record trace lifecycle event
+                                self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
+
                                 if self.verbose:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
                                     signals = self._expand_templates(templates, matched_vars, task.scope or "")
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
-                                    print(f"    [LOG] {log_msg}")
+                                    # Store log message in trace event
+                                    if upstream_trace_id in self.trace_lifecycle:
+                                        self.trace_lifecycle[upstream_trace_id][-1]["log_msg"] = log_msg
 
                                 fork_id += 1
 
@@ -351,13 +401,18 @@ class FsdbAnalyzer:
                                 )
                                 matched_rows.append(row_data)
 
+                                # Record trace lifecycle event
+                                self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
+
                                 if self.verbose:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
                                     signals = self._expand_templates(templates, matched_vars, task.scope or "")
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
-                                    print(f"    [LOG] {log_msg}")
+                                    # Store log message in trace event
+                                    if upstream_trace_id in self.trace_lifecycle:
+                                        self.trace_lifecycle[upstream_trace_id][-1]["log_msg"] = log_msg
 
                                 fork_id += 1
 
@@ -422,6 +477,185 @@ class FsdbAnalyzer:
                 row_data["capd"][sig] = vals[row_idx] if row_idx < len(vals) else "0"
 
         return row_data
+
+    def _export_trace_lifecycle(self, output_file: Path) -> None:
+        """Export trace lifecycle to file as linear paths
+
+        Args:
+            output_file: Path to output file
+        """
+        if not self.trace_lifecycle:
+            return
+
+        try:
+            with open(output_file, "w") as f:
+                f.write("=" * 70 + "\n")
+                f.write("Trace Lifecycle Report (Linear Paths)\n")
+                f.write("=" * 70 + "\n\n")
+
+                path_counter = 0
+                for trace_id in sorted(self.trace_lifecycle.keys()):
+                    events = self.trace_lifecycle[trace_id]
+                    if not events:
+                        continue
+
+                    # Build linear paths from trace events
+                    linear_paths = self._build_linear_paths(events)
+
+                    # Write each path
+                    for path_idx, path in enumerate(linear_paths):
+                        path_counter += 1
+                        f.write(f"Path #{path_counter} (Trace {trace_id}, Branch {path_idx}):\n")
+
+                        for step_idx, event in enumerate(path):
+                            task_name = event["task_name"]
+                            time = event["time"]
+                            log_msg = event.get("log_msg", "")
+
+                            # Use simple arrow notation for linear sequence
+                            if step_idx == 0:
+                                symbol = "●"  # Start
+                            elif step_idx == len(path) - 1:
+                                symbol = "◆"  # End
+                            else:
+                                symbol = "→"  # Middle
+
+                            f.write(f"  {symbol} [{task_name}] time={time}")
+
+                            # Add variables if present
+                            if event.get("vars"):
+                                vars_str = ", ".join(f"{k}={v}" for k, v in event["vars"].items())
+                                f.write(f" ({vars_str})")
+
+                            f.write("\n")
+
+                            # Write log message if available
+                            if log_msg:
+                                f.write(f"     LOG: {log_msg}\n")
+
+                            # Write captured signals in verbose mode
+                            if self.verbose and event["capd"]:
+                                f.write(f"     Captured signals:\n")
+                                for sig, val in event["capd"].items():
+                                    f.write(f"       {sig} = {val}\n")
+
+                        f.write("\n")  # Empty line between paths
+
+            print(f"[INFO] Trace lifecycle report exported to: {output_file}")
+        except Exception as e:
+            print(f"[WARN] Failed to export trace lifecycle: {e}")
+
+    def _build_linear_paths(self, events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Build linear paths from trace events by expanding forks
+
+        Each path is a complete chain from trigger to a leaf node.
+
+        Args:
+            events: List of events for a single trace_id
+
+        Returns:
+            List of paths, where each path is a list of events
+        """
+        if not events:
+            return []
+
+        # Build a tree structure: fork_path -> event
+        event_map: dict[tuple, dict[str, Any]] = {}
+        for event in events:
+            fork_path_tuple = tuple(event["fork_path"])
+            event_map[fork_path_tuple] = event
+
+        # Find all leaf nodes (nodes that are not prefixes of other nodes)
+        all_paths = set(event_map.keys())
+        leaf_paths = []
+
+        for path in all_paths:
+            is_leaf = True
+            for other_path in all_paths:
+                if other_path != path and len(other_path) > len(path):
+                    # Check if path is a prefix of other_path
+                    if other_path[:len(path)] == path:
+                        is_leaf = False
+                        break
+            if is_leaf:
+                leaf_paths.append(path)
+
+        # Build linear paths from root to each leaf
+        linear_paths = []
+        root_event = events[0]  # Trigger event always first
+
+        for leaf_path in leaf_paths:
+            path_events = [root_event]  # Start with trigger
+
+            # Build path by following fork_path indices
+            for depth in range(len(leaf_path)):
+                prefix = leaf_path[:depth + 1]
+                if prefix in event_map:
+                    path_events.append(event_map[prefix])
+
+            linear_paths.append(path_events)
+
+        # If no downstream events, return just the trigger
+        if not linear_paths:
+            linear_paths = [[root_event]]
+
+        return linear_paths
+
+    def _print_trace_lifecycle(self) -> None:
+        """Print trace lifecycle as linear paths (expand all forks)"""
+        if not self.trace_lifecycle:
+            return
+
+        print(f"\n{'=' * 70}")
+        print("Trace Lifecycle Report (Linear Paths)")
+        print(f"{'=' * 70}\n")
+
+        path_counter = 0
+        for trace_id in sorted(self.trace_lifecycle.keys()):
+            events = self.trace_lifecycle[trace_id]
+            if not events:
+                continue
+
+            # Build linear paths from trace events
+            linear_paths = self._build_linear_paths(events)
+
+            # Print each path
+            for path_idx, path in enumerate(linear_paths):
+                path_counter += 1
+                print(f"Path #{path_counter} (Trace {trace_id}, Branch {path_idx}):")
+
+                for step_idx, event in enumerate(path):
+                    task_name = event["task_name"]
+                    time = event["time"]
+                    log_msg = event.get("log_msg", "")
+
+                    # Use simple arrow notation for linear sequence
+                    if step_idx == 0:
+                        symbol = "●"  # Start
+                    elif step_idx == len(path) - 1:
+                        symbol = "◆"  # End
+                    else:
+                        symbol = "→"  # Middle
+
+                    print(f"  {symbol} [{task_name}] time={time}", end="")
+
+                    # Add variables if present
+                    if event.get("vars"):
+                        vars_str = ", ".join(f"{k}={v}" for k, v in event["vars"].items())
+                        print(f" ({vars_str})", end="")
+
+                    print()  # New line
+
+                    # Print log message if available
+                    if log_msg:
+                        print(f"     LOG: {log_msg}")
+
+                    # Print captured signals in verbose mode
+                    if self.verbose and event["capd"]:
+                        capd_preview = {k: v for k, v in list(event["capd"].items())[:3]}
+                        print(f"     Captured: {capd_preview}")
+
+                print()  # Empty line between paths
 
     def _capture_task(self, task: Task) -> str:
         """Execute capture mode task"""
@@ -498,6 +732,10 @@ class FsdbAnalyzer:
         for name, result in results:
             print(f"  {name}: {result}")
         print()
+
+        # Export trace lifecycle to file (no console output)
+        trace_report_file = self.output_dir / "trace_lifecycle.txt"
+        self._export_trace_lifecycle(trace_report_file)
 
 
 def main() -> None:

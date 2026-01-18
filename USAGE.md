@@ -211,3 +211,118 @@ C: trace_id=0      fork_path=[0,0], [0,1], [1,0], [2,0]
 ```
 
 **关键**: `trace_id` 始终从根继承，`fork_path` 唯一标识每条执行路径。
+
+---
+
+## Trace 生命周期追踪
+
+### 概述
+
+新增的 trace 生命周期追踪功能将每个 trace 的所有 fork 分支展开成独立的线性路径,清晰展示从触发到完成的完整执行链。
+
+### 输出格式
+
+执行分析后,会自动生成两种输出:
+
+1. **控制台输出**: 在任务执行完成后打印 Trace Lifecycle Report
+2. **文件输出**: 导出到 `{output_dir}/trace_lifecycle.txt`
+
+### 线性路径展开
+
+所有的 fork 分支都会被展开成独立的完整路径。例如:
+
+```
+原始 trace 结构:
+  biu_read (trigger)
+    ├─> ifu2idu (fork 0) -> idu_exec
+    ├─> ifu2idu (fork 1) -> idu_exec
+    └─> ifu2idu (fork 2) -> idu_exec
+
+展开后的线性路径:
+  Path #1: biu_read → ifu2idu (fork 0) → idu_exec
+  Path #2: biu_read → ifu2idu (fork 1) → idu_exec
+  Path #3: biu_read → ifu2idu (fork 2) → idu_exec
+```
+
+### 示例输出
+
+```
+======================================================================
+Trace Lifecycle Report (Linear Paths)
+======================================================================
+
+Path #1 (Trace 0, Branch 0):
+  ● [biu_read] time=100
+     LOG: BIU read data=0xAABBCCDD
+  → [ifu2idu] time=105 (idx=0)
+     LOG: IDU inst0=0xDD
+  ◆ [idu_exec] time=110
+     LOG: Execute inst=0xDD
+
+Path #2 (Trace 0, Branch 1):
+  ● [biu_read] time=100
+     LOG: BIU read data=0xAABBCCDD
+  → [ifu2idu] time=106 (idx=1)
+     LOG: IDU inst1=0xCC
+  ◆ [idu_exec] time=111
+     LOG: Execute inst=0xCC
+
+Path #3 (Trace 1, Branch 0):
+  ● [biu_read] time=200
+     LOG: BIU read data=0x11223344
+  → [ifu2idu] time=205 (idx=0)
+     LOG: IDU inst0=0x44
+  ◆ [idu_exec] time=210
+     LOG: Execute inst=0x44
+```
+
+### 解读
+
+- **Path #X** - 全局路径编号(连续递增)
+- **(Trace Y, Branch Z)** - 原始 trace ID 和该 trace 内的分支编号
+- `●` - 路径起点(Trigger 事件)
+- `→` - 路径中间步骤
+- `◆` - 路径终点(叶子节点)
+- **(var=value)** - 模式变量的匹配值
+- `LOG:` - 配置的 logging 消息
+
+每条路径都是完整且独立的,从 trigger 开始到某个终点结束,没有分支嵌套。
+
+### 详细模式
+
+启用 `verbose: true` 时,文件输出中会包含每个事件捕获的所有信号值:
+
+```
+Path #1 (Trace 0, Branch 0):
+  ● [biu_read] time=100
+     LOG: BIU read data=0xAABBCCDD
+     Captured signals:
+       tb.biu.biu_ifu_rd_data = AABBCCDD
+       tb.biu.biu_ifu_rd_grnt = 1
+  → [ifu2idu] time=105 (idx=0)
+     LOG: IDU inst0=0xDD
+     Captured signals:
+       tb.ifu.ifu_idu_ib_inst0_data = DD
+       tb.ifu.ifu_idu_ib_inst0_vld = 1
+  ◆ [idu_exec] time=110
+     Captured signals:
+       tb.idu.exec_result = ABCD1234
+```
+
+### 使用场景
+
+1. **调试复杂依赖链**: 每条路径都是独立完整的,容易跟踪特定执行序列
+2. **性能分析**: 分析每条路径从触发到完成的时间跨度
+3. **覆盖率验证**: 统计路径数量,确认所有预期分支都被覆盖
+4. **报告生成**: 线性路径格式直观清晰,适合作为验证报告
+5. **流水线分析**: 观察不同指令/数据在流水线中的完整路径
+
+### 配置
+
+Trace 生命周期追踪默认启用,无需额外配置。输出位置由 `output.directory` 控制:
+
+```yaml
+output:
+  directory: reports        # trace_lifecycle.txt 会生成在这里
+  verbose: true             # 控制是否输出详细的信号值
+```

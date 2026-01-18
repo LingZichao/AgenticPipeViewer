@@ -2,7 +2,7 @@
 import yaml
 import re
 from pathlib import Path
-from typing import Union, Any, List, Optional
+from typing import Union, Any, List, Optional, Dict
 from dataclasses import dataclass, field
 from utils import resolve_signal_path
 from condition_builder import Condition
