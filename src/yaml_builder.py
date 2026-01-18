@@ -250,7 +250,7 @@ class YamlBuilder:
 
         # Collect globalFlush condition signals
         if "globalFlush" in self.config:
-            flush_condition = self.config["globalFlush"]["condition"]
+            flush_condition = self._normalize_condition(self.config["globalFlush"]["condition"])
             flush_signals = ConditionBuilder.collect_signals(
                 flush_condition,
                 self.config.get("scope", "")

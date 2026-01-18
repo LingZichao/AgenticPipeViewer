@@ -47,6 +47,12 @@ fsdbFile: /path/to/waveform.fsdb
 globalClock: tb.clk
 scope: tb.top.module          # 全局信号前缀（可选）
 
+# 全局流水线清空（可选）
+globalFlush:
+  condition:
+    - rtu_ifu_flush == 1'b1
+    - rtu_ifu_xx_expt_vld == 1'b1
+
 output:
   directory: reports          # 输出目录
   verbose: true               # 详细日志
@@ -211,6 +217,75 @@ C: trace_id=0      fork_path=[0,0], [0,1], [1,0], [2,0]
 ```
 
 **关键**: `trace_id` 始终从根继承，`fork_path` 唯一标识每条执行路径。
+
+---
+
+## 全局流水线清空 (Global Flush)
+
+### 功能说明
+
+`globalFlush` 用于处理流水线级的全局清空事件（如异常、显式 flush），当这些事件发生时，**所有正在追踪的 trace** 都会被立即终止。
+
+### 配置格式
+
+```yaml
+globalFlush:
+  condition:
+    - rtu_ifu_flush == 1'b1           # RTU 显式 flush
+    - rtu_ifu_xx_expt_vld == 1'b1     # 异常发生
+```
+
+condition 是一个表达式列表，任意一个满足即触发 flush。
+
+### 行为机制
+
+1. **时间轴分区**: 分析器会扫描整个波形，找出所有满足 globalFlush 条件的时间点（flush boundaries）
+2. **区域划分**: 这些 flush 时间点将时间轴划分为多个区域（region）
+3. **跨区终止**: 任何 trace 在搜索时，一旦跨越 flush boundary，立即终止
+
+### 示例
+
+```
+时间轴:     0   10   20   30   40   50   60   70   80
+           |----|----|----|----|----|----|----|----|
+Flush:              ^                ^
+Region:    [   0    ] [      1      ] [      2      ]
+
+场景 1: Trace 从 T=15 开始
+  - 可以搜索到 T=29 (同一区域)
+  - T=30 遇到 flush boundary，trace 终止
+
+场景 2: Trace 从 T=35 开始
+  - 可以搜索到 T=49 (同一区域)
+  - T=50 遇到 flush boundary，trace 终止
+```
+
+### Global Flush vs Local Flush
+
+| 类型 | 作用范围 | 定义位置 | 处理方式 |
+|------|---------|---------|---------|
+| **Global Flush** | 整个流水线 | YAML 根配置 | 代码层实现，影响所有 task |
+| **Local Flush** | 部分流水线 | Task 互斥条件 | YAML 层定义，通过互斥任务实现 |
+
+**Local Flush 示例**（分支预测错误）：
+```yaml
+# 预测正确路径
+- id: path_predict_correct
+  condition: "ipctrl_branch_mistaken == 1'b0"
+
+# 预测错误路径（局部 flush）
+- id: path_predict_wrong
+  condition: "ipctrl_branch_mistaken == 1'b1"
+```
+
+这两个任务通过互斥条件自然实现了"局部 flush"效果，无需 globalFlush。
+
+### 实现细节
+
+- Flush 条件使用 `ConditionBuilder.build_raw()` 编译（无需创建 Task 对象）
+- Boundary 计算: `_compute_flush_boundaries()` 扫描所有时间点
+- Region 查询: `_get_flush_region(time)` 使用线性扫描
+- 在 `_trace_depends()` 中每个时间点都检查 region 是否改变
 
 ---
 

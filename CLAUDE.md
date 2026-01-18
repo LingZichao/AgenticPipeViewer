@@ -14,9 +14,14 @@ AgenticPipeViewer is an FSDB (Fast Signal Database) signal analyzer for hardware
 - Loads YAML configuration via `YamlBuilder`
 - Initializes `FsdbBuilder` for FSDB file access
 - Builds execution order based on task dependencies
+- Implements global flush mechanism:
+  - Compiles globalFlush condition using `build_raw()` (no Task object required)
+  - Pre-computes flush boundaries via `_compute_flush_boundaries()`
+  - Uses linear scan (`_get_flush_region()`) to determine time point's region
+  - Terminates traces crossing flush boundaries in `_trace_depends()`
 - Executes tasks in two modes:
   - **Trigger mode**: Tasks without dependencies, match conditions globally across all time
-  - **Trace mode**: Tasks with dependencies, search forward from upstream task matches
+  - **Trace mode**: Tasks with dependencies, search forward from upstream task matches (respects flush boundaries)
 - Manages runtime data sharing between tasks
 
 **[yaml_builder.py](yaml_builder.py)** - Configuration parser and validator
@@ -30,6 +35,9 @@ AgenticPipeViewer is an FSDB (Fast Signal Database) signal analyzer for hardware
 **[condition_builder.py](condition_builder.py)** - Condition compilation and evaluation
 - Compiles string-based conditions into executable `Condition` objects
 - Implements `ExpressionEvaluator` using Python AST for safe expression evaluation
+- Provides two build methods:
+  - `build(task, fsdb_builder)`: Build from Task object (internally calls `build_raw()`)
+  - `build_raw(raw_condition, scope, fsdb_builder)`: Direct compilation without Task object (used for globalFlush)
 - Supports custom operators:
   - `$split(n)`: Splits wide signal into n equal parts, returns `SignalGroup`
   - `<@`: "contains" operator for checking if value exists in `SignalGroup`
@@ -63,16 +71,27 @@ AgenticPipeViewer is an FSDB (Fast Signal Database) signal analyzer for hardware
    - Collect all signals-of-interest → `YamlBuilder.collect_raw_signals()`
      - From `capture` fields (with `{var}` → `{*}`)
      - From `condition` expressions → `ConditionBuilder.collect_signals()`
+     - From `globalFlush.condition` (if present)
    - Expand patterns and dump signals → `FsdbBuilder.dump_signals()`
 
 3. **Condition Building**:
    - For each task → `ConditionBuilder.build(task, fsdb_builder)`
    - Pattern conditions: Pre-compute candidate values by expanding signals with `expand_raw_signals()` and extracting variables via regex
    - Creates `Condition` object with compiled evaluator function
+   - For globalFlush → `ConditionBuilder.build_raw(raw_condition, scope, fsdb_builder)`
+     - No Task object needed, direct compilation from raw expression
 
-4. **Task Execution** (topological order):
+4. **Global Flush Boundary Computation** (if globalFlush defined):
+   - Evaluate flush condition for all time points → `_compute_flush_boundaries()`
+   - Store flush timestamps in `self.flush_boundaries` list
+   - Partition timeline into regions separated by flush events
+
+5. **Task Execution** (topological order):
    - **Trigger mode** (`_trace_trigger`): Load all needed signals, evaluate condition for each time index
    - **Trace mode** (`_trace_depends`): For each upstream match, search forward from that time
+     - Check flush region at start: `start_region = _get_flush_region(start_time)`
+     - For each subsequent time point, verify `current_region == start_region`
+     - Terminate trace immediately if region boundary is crossed
    - Store matched rows to `runtime_data[task.id]` for downstream tasks
 
 ## YAML Configuration Format
@@ -82,6 +101,12 @@ AgenticPipeViewer is an FSDB (Fast Signal Database) signal analyzer for hardware
 fsdbFile: path/to/simulation.fsdb
 globalClock: tb.clk
 scope: tb.top.module  # Optional global scope
+
+# Optional: Global pipeline flush condition
+globalFlush:
+  condition:
+    - rtu_ifu_flush == 1'b1
+    - rtu_ifu_xx_expt_vld == 1'b1
 
 output:
   directory: reports_dir
@@ -152,6 +177,54 @@ Tasks with `dependsOn` execute in trace mode:
 ```
 
 For each match in `upstream`, search forward from that time in `downstream`.
+
+### Global Flush
+
+Global flush terminates all in-flight traces when pipeline-wide flush events occur (e.g., exceptions, branch mispredictions, explicit flushes).
+
+**Configuration**:
+```yaml
+globalFlush:
+  condition:
+    - rtu_ifu_flush == 1'b1           # Explicit flush from RTU
+    - rtu_ifu_xx_expt_vld == 1'b1     # Exception occurs
+```
+
+**Behavior**:
+- The analyzer pre-computes all flush boundary time points where the condition is satisfied
+- Timeline is partitioned into regions separated by flush boundaries
+- Any trace that attempts to cross a flush boundary is terminated
+- This applies to ALL tasks, regardless of dependencies
+
+**Implementation Details**:
+- Flush condition compilation uses `ConditionBuilder.build_raw()` (no Task object needed)
+- Boundaries are computed via `_compute_flush_boundaries()` after signals are dumped
+- Region lookup uses linear scan via `_get_flush_region(time)`
+- Cross-region detection in `_trace_depends()` terminates traces immediately
+
+**Local Flush vs Global Flush**:
+- **Global Flush**: Defined in YAML root, affects ALL tasks pipeline-wide (handled in code)
+- **Local Flush**: Partial pipeline flushes (e.g., branch prediction) handled via task mutual exclusion in YAML
+  ```yaml
+  # Example: Local flush via mutual exclusion
+  - id: path_predict_correct
+    condition: "ipctrl_branch_mistaken == 1'b0"
+
+  - id: path_predict_wrong
+    condition: "ipctrl_branch_mistaken == 1'b1"
+  ```
+
+**Time-Axis Partitioning Example**:
+```
+Time:     0  10  20  30  40  50  60  70  80
+          |---|---|---|---|---|---|---|---|
+Flush:         ^           ^
+Region:   [ 0  ][ 1       ][ 2           ]
+
+Trace starting at T=15:
+  - Can search forward to T=39 (same region)
+  - Terminated at T=40 (crosses flush boundary)
+```
 
 ## Common Commands
 
