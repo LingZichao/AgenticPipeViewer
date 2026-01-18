@@ -699,14 +699,14 @@ class FsdbAnalyzer:
         """Compute all global flush boundary time points"""
         print("[INFO] Computing global flush boundaries...")
 
-        timestamps = self.fsdb_builder.get_timestamps()
+        timestamps = self.fsdb_builder.timestamps
 
         for row_idx in range(len(timestamps)):
             # Get signal values for this time point
             signal_values = {}
-            for signal in self.fsdb_builder.signals_cache:
+            for signal in self.fsdb_builder.signal_cache:
                 norm_signal = normalize_signal_name(signal)
-                values = self.fsdb_builder.signals_cache[signal]
+                values = self.fsdb_builder.signal_cache[signal]
                 signal_values[norm_signal] = values[row_idx] if row_idx < len(values) else "0"
 
             runtime_data = {"signal_values": signal_values}
@@ -768,7 +768,7 @@ class FsdbAnalyzer:
             flush_config = self.config["globalFlush"]
 
             # Build condition directly from raw expression
-            self.global_flush_condition = self.cond_builder.build_raw(
+            self.gflush_condition = self.cond_builder.build_raw(
                 raw_condition=flush_config["condition"],
                 scope=self.global_scope,
                 fsdb_builder=self.fsdb_builder

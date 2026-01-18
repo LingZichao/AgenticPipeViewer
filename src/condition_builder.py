@@ -236,6 +236,12 @@ class ConditionParser:
 
         Returns: (normalized_expr, signals, has_pattern, pattern_var)
         """
+        # Normalize input: convert list to string
+        if isinstance(expr, list):
+            expr = " ".join(line.strip() for line in expr if line.strip())
+        elif not isinstance(expr, str):
+            expr = str(expr)
+        
         # Step 1: Extract pattern signals (before normalization)
         self._extract_patterns(expr)
 
@@ -408,6 +414,12 @@ class ConditionBuilder:
         # Parse and preprocess expression using unified parser
         parser = ConditionParser(scope)
         norm_expr, signals, has_pattern, pattern_var = parser.parse(raw_condition)
+        
+        # Normalize raw_condition for storage (convert list to string if needed)
+        if isinstance(raw_condition, list):
+            raw_condition_str = " ".join(line.strip() for line in raw_condition if line.strip())
+        else:
+            raw_condition_str = str(raw_condition)
 
         # Pre-compute pattern candidates if needed
         pattern_candidates = None
@@ -419,7 +431,7 @@ class ConditionBuilder:
         # Build unified evaluator
         evaluator = self._build_evaluator(
             scope,
-            raw_condition,
+            raw_condition_str,
             has_pattern,
             pattern_var,
             parser.pattern_signals if has_pattern else None,
@@ -427,7 +439,7 @@ class ConditionBuilder:
         )
 
         return Condition(
-            raw_expr=raw_condition,
+            raw_expr=raw_condition_str,
             norm_expr=norm_expr,
             evaluator=evaluator,
             signals=signals,
