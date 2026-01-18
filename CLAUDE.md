@@ -80,7 +80,7 @@ AgenticPipeViewer is an FSDB (Fast Signal Database) signal analyzer for hardware
 ### Required Fields
 ```yaml
 fsdbFile: path/to/simulation.fsdb
-clockSignal: tb.clk
+globalClock: tb.clk
 scope: tb.top.module  # Optional global scope
 
 output:

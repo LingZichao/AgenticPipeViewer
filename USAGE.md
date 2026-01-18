@@ -44,7 +44,7 @@ Trace Task (ifu2idu):
 
 ```yaml
 fsdbFile: /path/to/waveform.fsdb
-clockSignal: tb.clk
+globalClock: tb.clk
 scope: tb.top.module          # 全局信号前缀（可选）
 
 output:

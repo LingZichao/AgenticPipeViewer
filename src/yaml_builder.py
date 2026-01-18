@@ -145,7 +145,7 @@ class YamlBuilder:
                 f"[ERROR] Missing 'tasks' field or task list is empty {line_info}"
             )
 
-        config.setdefault("clockSignal", "clk")
+        config.setdefault("globalClock", "clk")
         config.setdefault("scope", "")
 
         if "output" not in config:

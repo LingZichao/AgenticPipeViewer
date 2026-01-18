@@ -44,7 +44,7 @@ class FsdbAnalyzer:
         # Step 4: Pass signal info to YamlBuilder for validation and resolution
         self.config: dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
 
-        self.clock_signal: str = self.config["clockSignal"]
+        self.clock_signal: str = self.config["globalClock"]
         self.global_scope: str = self.config["scope"]
         self.runtime_data: dict[str, Any] = {}
         self.cond_builder = ConditionBuilder()
