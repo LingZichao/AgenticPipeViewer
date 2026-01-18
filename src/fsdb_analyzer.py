@@ -12,7 +12,7 @@ from utils import resolve_signal_path, normalize_signal_name
 class FsdbAnalyzer:
     """Advanced FSDB signal analyzer with complex condition support"""
 
-    def __init__(self, config_path: str, deps_only: bool = False) -> None:
+    def __init__(self, config_path: str, deps_only: bool = False, debug_num: int = 0) -> None:
         """Initialize analyzer from config file"""
         config_file = Path(config_path)
         if not config_file.exists():
@@ -23,6 +23,7 @@ class FsdbAnalyzer:
 
         self.config_path: str = config_path
         self.deps_only = deps_only
+        self.debug_num = debug_num  # Limit number of triggers (0 = unlimited)
 
         # Step 1: Load basic config to get FSDB file path
         self.yaml_builder = YamlBuilder()
@@ -110,6 +111,10 @@ class FsdbAnalyzer:
         templates = task.capture
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
+        # Debug mode message
+        if self.debug_num > 0:
+            print(f"[DEBUG] Limiting to {self.debug_num} trigger(s)")
+
         cond = task.condition
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
@@ -153,6 +158,11 @@ class FsdbAnalyzer:
         trace_id = 0  # Track number of matches
 
         for row_idx in range(max_len):
+            # Check debug_num limit (0 means unlimited)
+            if self.debug_num > 0 and trace_id >= self.debug_num:
+                print(f"[DEBUG] Reached debug limit of {self.debug_num} trigger(s), stopping")
+                break
+
             try:
                 # Build signal_values for this time point
                 signal_values = {}
@@ -827,11 +837,14 @@ def main() -> None:
 Examples:
   # Run with advanced configuration
   %(prog)s -c ifu_analysis_advanced.yaml
+
+  # Debug mode: limit to first trigger match
+  %(prog)s -c ifu_analysis_advanced.yaml --debug-num 1
         """,
     )
 
     parser.add_argument(
-        "-c", "--config", required=True, 
+        "-c", "--config", required=True,
         help="YAML configuration file path"
     )
 
@@ -841,9 +854,16 @@ Examples:
         help="Only generate dependency graph and exit (skip FSDB analysis)",
     )
 
+    parser.add_argument(
+        "--debug-num",
+        type=int,
+        default=0,
+        help="Limit number of trigger matches for debugging (0 = unlimited)",
+    )
+
     args = parser.parse_args()
 
-    analyzer = FsdbAnalyzer(args.config, deps_only=args.deps_only)
+    analyzer = FsdbAnalyzer(args.config, deps_only=args.deps_only, debug_num=args.debug_num)
     analyzer.run()
 
 

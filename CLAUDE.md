@@ -230,8 +230,24 @@ Trace starting at T=15:
 
 ### Running Analysis
 ```bash
+# Standard analysis
 python3 fsdb_analyzer.py -c config.yaml
+
+# Debug mode: limit to first N trigger matches (useful for testing/debugging)
+python3 fsdb_analyzer.py -c config.yaml --debug-num 1
+
+# Generate dependency graph only (no FSDB analysis)
+python3 fsdb_analyzer.py -c config.yaml --deps-only
 ```
+
+### Command Line Options
+
+- `-c, --config FILE`: YAML configuration file path (required)
+- `--debug-num N`: Limit number of trigger matches for debugging (default: 0 = unlimited)
+  - Only affects trigger tasks (tasks without dependencies)
+  - Useful for quickly testing trace logic with minimal data
+  - Example: `--debug-num 1` matches only the first trigger, creating a single trace
+- `--deps-only`: Generate dependency graph and exit without FSDB analysis
 
 ### Development
 

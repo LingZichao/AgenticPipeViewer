@@ -5,7 +5,9 @@ deprecated
 
 fsdbdebugLog
 fsdbreportLog
-out.txt
+out.*
+*.log
+*.bak
 
 *reports
 *.yaml
