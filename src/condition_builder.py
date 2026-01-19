@@ -160,16 +160,34 @@ class ExpressionEvaluator(ast.NodeVisitor):
             parts = name.split("__")
             if len(parts) >= 3:
                 # parts[0] = "_dep", parts[1] = taskid, parts[2] = signalname
+                target_task_id = parts[1]
                 signal_name = parts[2]
             else:
                 raise ValueError(f"Invalid $dep format: {name}")
-            for sig in self.upstream_data.get("capd", []):
+
+            # Get the full dependency chain from upstream_row
+            # dep_chain is a dict: {task_id: {signal_name: value}}
+            dep_chain = self.upstream_row.get("dep_chain", {})
+
+            # Try to find the signal in the target task's captured data
+            # First check if target_task_id is in the dependency chain
+            if target_task_id not in dep_chain:
+                raise ValueError(
+                    f"Task '{target_task_id}' not found in dependency chain. "
+                    f"Available tasks: {list(dep_chain.keys())}"
+                )
+
+            # Get the captured data from the target task
+            target_capd = dep_chain[target_task_id]
+
+            # Search for the signal in the target task's captured signals
+            for sig in target_capd.keys():
                 if (
                     sig.endswith("." + signal_name)
                     or sig.endswith("/" + signal_name)
                     or sig == signal_name
                 ):
-                    val_str = self.upstream_row["capd"].get(sig, "0")
+                    val_str = target_capd.get(sig, "0")
                     # Store the original hex string length for bit width calculation
                     # This is used by $split to preserve leading zeros
                     clean_str = val_str[2:] if val_str.startswith("0x") else val_str
@@ -178,7 +196,11 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     # The caller will extract the int value, but _split can use this
                     self._last_dep_bitwidth = len(clean_str) * 4
                     return val_int
-            raise ValueError(f"Signal '{signal_name}' not found in upstream")
+
+            raise ValueError(
+                f"Signal '{signal_name}' not found in task '{target_task_id}'. "
+                f"Available signals: {list(target_capd.keys())}"
+            )
 
         signal = resolve_signal_path(name, self.scope)
         val_str = self.signal_values.get(signal, "0")

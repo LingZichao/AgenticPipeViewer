@@ -183,8 +183,14 @@ class FsdbAnalyzer:
                     # Expand capture templates with matched variables
                     signals = self._expand_templates(templates, vars, task.scope or "")
 
-                    # Build row_data with trace_id and fork_path (root has empty fork_path)
-                    row_data = {"time": row_idx, "trace_id": trace_id, "fork_path": [], "capd": {}}
+                    # Build row_data with trace_id, fork_path, and dep_chain
+                    row_data = {
+                        "time": row_idx,
+                        "trace_id": trace_id,
+                        "fork_path": [],
+                        "capd": {},
+                        "dep_chain": {},  # Initialize dep_chain for trigger tasks
+                    }
                     for sig in signals:
                         # Normalize signal name to match cache keys
                         normalized_sig = normalize_signal_name(sig)
@@ -195,6 +201,9 @@ class FsdbAnalyzer:
                                 vals[row_idx] if row_idx < len(vals) else "0"
                             )
                         # Signal not found in signal_data - skip silently
+
+                    # Add current task's captured data to dep_chain
+                    row_data["dep_chain"][task.id] = row_data["capd"].copy()
 
                     matched_rows.append(row_data)
 
@@ -374,7 +383,7 @@ class FsdbAnalyzer:
                                 # Original behavior: capture first match, break
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task
+                                    matched_vars, templates, signal_data, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -391,6 +400,7 @@ class FsdbAnalyzer:
                                     if upstream_trace_id in self.trace_lifecycle:
                                         self.trace_lifecycle[upstream_trace_id][-1]["log_msg"] = log_msg
 
+                                fork_id += 1  # Increment fork_id for match_mode="first"
                                 break  # Stop after first match
 
                             elif match_mode == "unique_per_var":
@@ -402,7 +412,7 @@ class FsdbAnalyzer:
 
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task
+                                    matched_vars, templates, signal_data, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -425,7 +435,7 @@ class FsdbAnalyzer:
                                 # Capture ALL matches in time window
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task
+                                    matched_vars, templates, signal_data, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -468,8 +478,9 @@ class FsdbAnalyzer:
         templates: List[str],
         signal_data: Dict[str, List[str]],
         task: Task,
+        upstream_row: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Build row_data with fork support
+        """Build row_data with fork support and dependency chain propagation
 
         Args:
             row_idx: Current row index in signal data
@@ -480,6 +491,7 @@ class FsdbAnalyzer:
             templates: Capture signal templates
             signal_data: Signal cache data
             task: Task configuration
+            upstream_row: Upstream row data (for dependency chain propagation)
 
         Returns:
             Row data dictionary with trace info and captured values
@@ -494,8 +506,10 @@ class FsdbAnalyzer:
             "fork_id": fork_id,
             "vars": vars.copy(),
             "capd": {},
+            "dep_chain": {},  # Dependency chain: {task_id: {signal: value}}
         }
 
+        # Capture current task's signals
         for sig in signals:
             # Normalize signal name to match cache keys
             normalized_sig = normalize_signal_name(sig)
@@ -503,6 +517,19 @@ class FsdbAnalyzer:
                 vals = signal_data[normalized_sig]
                 # Use original signal name (with scope) as key in capd
                 row_data["capd"][sig] = vals[row_idx] if row_idx < len(vals) else "0"
+
+        # Build dependency chain: inherit from upstream + add current task
+        if upstream_row:
+            # Copy upstream dependency chain
+            row_data["dep_chain"] = upstream_row.get("dep_chain", {}).copy()
+            # Add upstream task's captured data
+            if upstream_row.get("capd"):
+                upstream_task_id = task.deps[0] if task.deps else None
+                if upstream_task_id:
+                    row_data["dep_chain"][upstream_task_id] = upstream_row["capd"].copy()
+
+        # Add current task's captured data to the chain
+        row_data["dep_chain"][task.id] = row_data["capd"].copy()
 
         return row_data
 
