@@ -22,12 +22,6 @@ class FsdbBuilder:
         self._signals_list: List[str] = [] # All signals name in FSDB
         self._signals_vidcode_map: Dict[str, int] = {}  # signal_name -> vidcode
 
-    def to_fsdb_path(self, signal: str) -> str:
-        """Convert signal path from dot notation to FSDB format (slash)"""
-        if signal.startswith('/'):
-            return signal
-        return '/' + signal.replace('.', '/')
-
     def get_signals_index(self) -> Dict[str, int]:
         """Get all signals from FSDB, returns normalized_name -> vidcode mapping"""
         if self._signals_list:
