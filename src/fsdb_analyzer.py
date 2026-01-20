@@ -31,8 +31,8 @@ class FsdbAnalyzer:
 
         # Step 2: Extract config parameters
         self.verbose: bool = raw_config["output"]["verbose"]
-        self.timeout: int = raw_config["output"]["timeout"]
-        self.fsdb_file = Path(raw_config["fsdbFile"])
+        self.timeout: int  = raw_config["output"]["timeout"]
+        self.fsdb_file  = Path(raw_config["fsdbFile"])
         self.output_dir = Path(raw_config["output"]["directory"])
 
         # Step 3: Initialize ConditionBuilder before resolving config

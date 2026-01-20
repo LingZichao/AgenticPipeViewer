@@ -14,8 +14,6 @@ class Task:
     id: str
     capture: List[str]
     raw_condition: str
-    has_dep_in_condition: bool
-    has_pattern_in_capture: bool
 
     name: Optional[str] = None
     scope: Optional[str] = None
@@ -40,10 +38,6 @@ class Task:
 
         # Resolve capture signals to final form
         capture = yaml_builder.resolve_capture_signals(raw_capture, final_scope)
-
-        # Analyze condition and capture
-        has_dep = "$dep." in raw_condition
-        has_pattern = any("{" in str(sig) and "}" in str(sig) for sig in raw_capture)
 
         task_id = data.get("id")
         if not task_id or not isinstance(task_id, str):
@@ -70,8 +64,6 @@ class Task:
             id=task_id,
             raw_condition=raw_condition,
             capture=capture,
-            has_dep_in_condition=has_dep,
-            has_pattern_in_capture=has_pattern,
             name=data.get("name"),
             scope=final_scope,
             deps=data.get("dependsOn", []),
