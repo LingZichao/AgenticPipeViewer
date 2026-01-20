@@ -350,6 +350,86 @@ Format shows linear paths with global numbering:
 - Log messages stored in event data rather than printed immediately
 - `_build_linear_paths()`: Expands fork tree into independent linear paths
 
+## Duplicate Match Detection
+
+The analyzer detects when the same waveform row (time point) is matched multiple times **within the same task**, which may indicate that a condition is satisfied by multiple upstream traces or forks reaching the same downstream event.
+
+### Data Structure
+
+- `matched_rows_tracker`: Dict mapping `(task_id, time)` tuple to list of match records
+- Only tracks duplicates within the same task (cross-task matches are ignored)
+- Each match record contains:
+  - `task_id`, `task_name`: Task that matched this row
+  - `trace_id`: Trace identifier (which upstream trigger)
+  - `fork_path`: Fork path at time of match
+
+### Behavior
+
+**Real-time Warning**: When a duplicate match is detected within the same task, an immediate warning is printed to console:
+```
+[WARN] Row duplicate match detected in task 'decode' at time=42!
+  Current match: trace=1, path=[0, 2]
+  Previous match(es) in same task:
+    - trace=1, path=[0, 1]
+    - trace=2, path=[0]
+  This may indicate condition matched multiple times from different upstream traces/forks.
+```
+
+**Summary Report**: At the end of analysis, a summary is displayed:
+```
+======================================================================
+[WARN] Duplicate Match Detection Summary (Within-Task)
+======================================================================
+Total rows with duplicate matches within same task: 5
+See trace_lifecycle.txt for details.
+======================================================================
+```
+
+**Detailed Export**: The `trace_lifecycle.txt` file includes a "Duplicate Match Summary (Within-Task Only)" section:
+```
+======================================================================
+Duplicate Match Summary (Within-Task Only)
+======================================================================
+Total rows with duplicate matches within same task: 5
+
+Details:
+
+Task 'decode':
+  Time=42: 3 matches
+    - trace=1, path=[0, 1]
+    - trace=1, path=[0, 2]
+    - trace=2, path=[0]
+  Time=58: 2 matches
+    - trace=3, path=[0]
+    - trace=4, path=[0]
+```
+
+### Implementation
+
+- `_check_duplicate_match()`: Checks for previous matches at the same time point within the same task
+  - Uses `(task_id, time)` as key to isolate duplicates per task
+  - Called from `_trace_trigger()` for all trigger matches
+  - Called from `_trace_depends()` for all trace matches (all match modes)
+  - Prints warning immediately when duplicate detected
+  - Updates `matched_rows_tracker` with current match record
+
+### Use Cases
+
+Within-task duplicate matches can indicate:
+1. **Fork Convergence**: Multiple forks from the same upstream trace converge on the same downstream event
+2. **Multi-Trace Convergence**: Different upstream triggers (traces) lead to matching the same downstream event
+3. **Condition Over-Matching**: The condition is too broad and matches the same event multiple times
+
+**Example Scenario**:
+- Upstream task creates 2 traces (trace 0, trace 1)
+- Each trace forks into multiple paths
+- Downstream task's condition matches at time=42 from:
+  - trace 0, fork 1
+  - trace 0, fork 2
+  - trace 1, fork 0
+
+This detection helps identify potential issues where a downstream event is being counted multiple times, which may or may not be intended behavior.
+
 ## Example Workflow
 
 For a task with pattern and dependency:

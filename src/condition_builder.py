@@ -123,6 +123,14 @@ class ExpressionEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> Any:
         return node.value
 
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        signal_name = self._get_name(node)
+        signal = resolve_signal_path(signal_name, self.scope)
+        val_str = self.signal_values.get(signal, "0")
+        if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
+            return 0
+        return int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
+
     def visit_Call(self, node: ast.Call) -> Any:
         """Handle function calls, including custom operators like _split() and _contains()"""
         if isinstance(node.func, ast.Name):
@@ -210,13 +218,46 @@ class ExpressionEvaluator(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> Any:
         signal_name = self._get_name(node.value)
-        signal = resolve_signal_path(signal_name, self.scope)
-        val_str = self.signal_values.get(signal, "0")
-        val_int = (
-            0
-            if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*")
-            else int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
-        )
+        if isinstance(node.value, ast.Name) and signal_name.startswith("_dep__"):
+            parts = signal_name.split("__")
+            if len(parts) >= 3:
+                target_task_id = parts[1]
+                dep_signal_name = "__".join(parts[2:])
+            else:
+                raise ValueError(f"Invalid $dep format: {signal_name}")
+
+            dep_chain = self.upstream_row.get("dep_chain", {})
+            if target_task_id not in dep_chain:
+                raise ValueError(
+                    f"Task '{target_task_id}' not found in dependency chain. "
+                    f"Available tasks: {list(dep_chain.keys())}"
+                )
+
+            target_capd = dep_chain[target_task_id]
+            for sig in target_capd.keys():
+                if (
+                    sig.endswith("." + dep_signal_name)
+                    or sig.endswith("/" + dep_signal_name)
+                    or sig == dep_signal_name
+                ):
+                    val_str = target_capd.get(sig, "0")
+                    clean_str = val_str[2:] if val_str.startswith("0x") else val_str
+                    val_int = int("0x" + clean_str, 16)
+                    self._last_dep_bitwidth = len(clean_str) * 4
+                    break
+            else:
+                raise ValueError(
+                    f"Signal '{dep_signal_name}' not found in task '{target_task_id}'. "
+                    f"Available signals: {list(target_capd.keys())}"
+                )
+        else:
+            signal = resolve_signal_path(signal_name, self.scope)
+            val_str = self.signal_values.get(signal, "0")
+            val_int = (
+                0
+                if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*")
+                else int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
+            )
 
         if isinstance(node.slice, ast.Slice):
             # Python parses [31:0] as lower=31, upper=0

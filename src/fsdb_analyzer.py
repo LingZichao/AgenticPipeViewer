@@ -59,6 +59,53 @@ class FsdbAnalyzer:
         # Trace lifecycle tracking
         self.trace_lifecycle: Dict[int, List[Dict[str, Any]]] = {}  # trace_id -> list of events
 
+        # Row duplicate match detection: (task_id, time) -> list of match records
+        # Only tracks duplicates within the same task
+        self.matched_rows_tracker: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+
+    def _check_duplicate_match(
+        self,
+        time: int,
+        task: Task,
+        trace_id: int,
+        fork_path: List[int],
+    ) -> None:
+        """Check if a row has been matched multiple times within the same task
+
+        Args:
+            time: Time index (row number)
+            task: Current task that matched this row
+            trace_id: Current trace identifier
+            fork_path: Current fork path
+        """
+        # Use (task_id, time) as key to track duplicates only within same task
+        key = (task.id, time)
+
+        if key not in self.matched_rows_tracker:
+            self.matched_rows_tracker[key] = []
+
+        # Record current match
+        current_match = {
+            "task_id": task.id,
+            "task_name": task.name or task.id,
+            "trace_id": trace_id,
+            "fork_path": fork_path.copy(),
+        }
+
+        # Check for previous matches at this time within the same task
+        previous_matches = self.matched_rows_tracker[key]
+        if previous_matches:
+            # Duplicate detected - generate warning
+            print(f"\n[WARN] Row duplicate match detected in task '{task.name or task.id}' at time={time}!")
+            print(f"  Current match: trace={trace_id}, path={fork_path}")
+            print(f"  Previous match(es) in same task:")
+            for prev in previous_matches:
+                print(f"    - trace={prev['trace_id']}, path={prev['fork_path']}")
+            print(f"  This may indicate condition matched multiple times from different upstream traces/forks.\n")
+
+        # Add current match to tracker
+        self.matched_rows_tracker[key].append(current_match)
+
     def _record_trace_event(
         self,
         trace_id: int,
@@ -206,6 +253,9 @@ class FsdbAnalyzer:
                     row_data["dep_chain"][task.id] = row_data["capd"].copy()
 
                     matched_rows.append(row_data)
+
+                    # Check for duplicate match
+                    self._check_duplicate_match(row_idx, task, trace_id, row_data["fork_path"])
 
                     # Record trace lifecycle event (trigger starts a new trace)
                     self._record_trace_event(trace_id, task, row_data, event_type="trigger")
@@ -387,6 +437,9 @@ class FsdbAnalyzer:
                                 )
                                 matched_rows.append(row_data)
 
+                                # Check for duplicate match
+                                self._check_duplicate_match(row_idx, task, upstream_trace_id, row_data["fork_path"])
+
                                 # Record trace lifecycle event
                                 self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
 
@@ -416,6 +469,9 @@ class FsdbAnalyzer:
                                 )
                                 matched_rows.append(row_data)
 
+                                # Check for duplicate match
+                                self._check_duplicate_match(row_idx, task, upstream_trace_id, row_data["fork_path"])
+
                                 # Record trace lifecycle event
                                 self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
 
@@ -438,6 +494,9 @@ class FsdbAnalyzer:
                                     matched_vars, templates, signal_data, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
+
+                                # Check for duplicate match
+                                self._check_duplicate_match(row_idx, task, upstream_trace_id, row_data["fork_path"])
 
                                 # Record trace lifecycle event
                                 self._record_trace_event(upstream_trace_id, task, row_data, event_type="match")
@@ -595,6 +654,33 @@ class FsdbAnalyzer:
                                     f.write(f"       {sig} = {val}\n")
 
                         f.write("\n")  # Empty line between paths
+
+                # Add duplicate match summary at the end
+                f.write("=" * 70 + "\n")
+                f.write("Duplicate Match Summary (Within-Task Only)\n")
+                f.write("=" * 70 + "\n\n")
+
+                duplicate_count = sum(1 for matches in self.matched_rows_tracker.values() if len(matches) > 1)
+                if duplicate_count > 0:
+                    f.write(f"Total rows with duplicate matches within same task: {duplicate_count}\n\n")
+                    f.write("Details:\n")
+
+                    # Group by task for better readability
+                    task_duplicates = {}
+                    for (task_id, time), matches in self.matched_rows_tracker.items():
+                        if len(matches) > 1:
+                            if task_id not in task_duplicates:
+                                task_duplicates[task_id] = []
+                            task_duplicates[task_id].append((time, matches))
+
+                    for task_id in sorted(task_duplicates.keys()):
+                        f.write(f"\nTask '{task_duplicates[task_id][0][1][0]['task_name']}':\n")
+                        for time, matches in sorted(task_duplicates[task_id]):
+                            f.write(f"  Time={time}: {len(matches)} matches\n")
+                            for match in matches:
+                                f.write(f"    - trace={match['trace_id']}, path={match['fork_path']}\n")
+                else:
+                    f.write("No duplicate matches detected within any task.\n")
 
             print(f"[INFO] Trace lifecycle report exported to: {output_file}")
         except Exception as e:
@@ -853,6 +939,16 @@ class FsdbAnalyzer:
         # Export trace lifecycle to file (no console output)
         trace_report_file = self.output_dir / "trace_lifecycle.txt"
         self._export_trace_lifecycle(trace_report_file)
+
+        # Print duplicate match summary to console
+        duplicate_count = sum(1 for matches in self.matched_rows_tracker.values() if len(matches) > 1)
+        if duplicate_count > 0:
+            print(f"\n{'=' * 70}")
+            print(f"[WARN] Duplicate Match Detection Summary (Within-Task)")
+            print(f"{'=' * 70}")
+            print(f"Total rows with duplicate matches within same task: {duplicate_count}")
+            print(f"See {trace_report_file} for details.")
+            print(f"{'=' * 70}\n")
 
 
 def main() -> None:
