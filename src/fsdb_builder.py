@@ -2,23 +2,22 @@
 import subprocess
 import re
 from pathlib import Path
-from typing import List, Dict, Tuple
-from utils import resolve_signal_path, normalize_signal_name
+from typing import List, Dict
+from utils import Signal
 
 
 class FsdbBuilder:
     """FSDB file parser using external tools"""
 
     def __init__(self, fsdb_file: Path, output_dir: Path, verbose: bool = False) -> None:
-        self.fsdb_file: Path = fsdb_file
-        self.verbose: bool = verbose
+        self.fsdb_file: Path  = fsdb_file
         self.output_dir: Path = output_dir
-        self.signal_cache: Dict[str, List[str]] = {}  # Normalized name -> values
-        self.signal_widths: Dict[str, Tuple[int, int]] = {}
-        self.all_signals_list: List[str] = []
-        self.signal_name_map: Dict[str, str] = {}  # Normalized name -> FSDB name with bitwidth
+        self.verbose: bool    = verbose
+
+        self.signals: Dict[str, Signal] = {}  # Normalized name -> Signal object
         self.timestamps: List[int] = []  # FSDB timestamps in 100fs units
-        self._signal_vidcode_map: Dict[str, int] = {}  # signal_name -> vidcode
+        self._signals_list: List[str] = [] # All signals name in FSDB
+        self._signals_vidcode_map: Dict[str, int] = {}  # signal_name -> vidcode
 
     def to_fsdb_path(self, signal: str) -> str:
         """Convert signal path from dot notation to FSDB format (slash)"""
@@ -27,10 +26,11 @@ class FsdbBuilder:
         return '/' + signal.replace('.', '/')
 
     def get_signals_index(self) -> Dict[str, int]:
-        """Get all signals from FSDB using fsdbdebug, returns signal_name -> vidcode mapping"""
-        if self.all_signals_list:
-            return {sig: self._signal_vidcode_map.get(sig, -1) for sig in self.all_signals_list}
+        """Get all signals from FSDB, returns normalized_name -> vidcode mapping"""
+        if self._signals_list:
+            return {sig: self._signals_vidcode_map.get(sig, -1) for sig in self._signals_list}
 
+        # If signals list is empty, build it from fsdbdebug
         cmd = ['fsdbdebug', '-hier_tree', str(self.fsdb_file.absolute())]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               universal_newlines=True, timeout=60)
@@ -46,109 +46,78 @@ class FsdbBuilder:
             if not line.startswith('Var:'):
                 continue
 
-            # Extract signal name, width, and vidcode from format:
-            # Var: type name[bits] l:left r:right ... vidcode ...
+            # Extract signal name and vidcode
             parts = line.split()
             if len(parts) < 4:
                 continue
-            sig_name = parts[2]
+            # Normalize FSDB slash-separated path to dot notation
+            sig_name = parts[2].replace("/", ".").lstrip(".")
 
-            # Find l:, r: values and vidcode (last integer before 1B)
-            left, right, vidcode = None, None, None
+            # Find vidcode (last integer before 1B)
+            vidcode = None
             for i, part in enumerate(parts):
-                if part.startswith('l:'):
-                    left = int(part[2:])
-                elif part.startswith('r:'):
-                    right = int(part[2:])
-                elif i > 3 and part.isdigit() and i + 1 < len(parts) and parts[i + 1] in ('1B', '0'):
+                if i > 3 and part.isdigit() and i + 1 < len(parts) and parts[i + 1] in ('1B', '0'):
                     vidcode = int(part)
+                    break
 
-            if left is not None and right is not None:
-                self.signal_widths[sig_name] = (left, right)
             if vidcode is not None:
-                self._signal_vidcode_map[sig_name] = vidcode
+                self._signals_vidcode_map[sig_name] = vidcode
 
             signals.append(sig_name)
 
-        self.all_signals_list = signals
-        return {sig: self._signal_vidcode_map.get(sig, -1) for sig in signals}
+        self._signals_list = signals
+        return {sig: self._signals_vidcode_map.get(sig, -1) for sig in signals}
 
     def get_signal(self, signal: str) -> List[str]:
         """Get cached signal values"""
-        if signal in self.signal_cache:
-            return self.signal_cache[signal]
+        if signal in self.signals:
+            return self.signals[signal].values
         raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")
 
     def expand_raw_signals(self, raw_signals: List[str]) -> List[str]:
-        """Expand raw signals containing {*} patterns to actual signal names
-
-        Note: This method handles two types of bit ranges:
-        1. FSDB signal bit width: e.g., signal[127:0] in FSDB index
-        2. Pattern with bit range: e.g., signal{*}[31:0] (bit range is NOT expanded)
-
-        Args:
-            raw_signals: List of signal patterns, may contain {*} wildcards
-
-        Returns:
-            List of actual signal names with patterns expanded
-        """
-        all_signals = self.get_signals_index()
+        """Expand patterns and resolve bit-ranges for a list of signals"""
+        all_sigs = self.get_signals_index().keys()
         expanded = []
-
         for sig in raw_signals:
             if "{*}" in sig:
                 # Convert pattern to regex: signal{*} -> signal[a-zA-Z0-9_$]+
-                # Match any valid Verilog identifier characters
-                regex_pattern = "^" + re.escape(sig).replace(r"\{\*\}", r"[a-zA-Z0-9_$]+")
-                regex_pattern += r"(?:\[\d+:\d+\])?$"  # Allow optional bit range
-
-                matches = []
-                for fsdb_sig in all_signals:
-                    sig_dot = fsdb_sig.replace("/", ".").lstrip(".")
-                    if re.match(regex_pattern, sig_dot):
-                        matches.append(sig_dot)
-                        expanded.append(sig_dot)
+                pattern = "^" + re.escape(sig).replace(r"\{\*\}", r"[a-zA-Z0-9_$]+") + r"(?:\[\d+:\d+\])?$"
+                expanded.extend([s for s in all_sigs if re.match(pattern, s)])
             else:
-                # For non-pattern signals, try to match with bit range
-                matched = False
-                for fsdb_sig in all_signals:
-                    sig_dot = fsdb_sig.replace("/", ".").lstrip(".")
-                    # Exact match or match with bit range
-                    if sig_dot == sig or sig_dot.startswith(sig + "["):
-                        expanded.append(sig_dot)
-                        matched = True
-                        break
-                if not matched:
-                    expanded.append(sig)
-
+                # Match exact name or name with bit range (e.g., sig -> sig[31:0])
+                match = next((s for s in all_sigs if s == sig or s.startswith(sig + "[")), sig)
+                expanded.append(match)
         return expanded
 
     def dump_signals(self, signals: List[str]) -> None:
-        """Dump all signals using fsdbdebug -vc -vidcode"""
+        """Dump all signals-of-interest using fsdbdebug -vc -vidcode"""
         if not signals:
+            print("[WARN] No signals provided, skipping FSDB dump")
             return
 
-        # Expand patterns with {*} - this already handles bit ranges
-        matched_signals = self.expand_raw_signals(signals)
+        vidcode_map = self.get_signals_index()
+        self.signals = {}
+        matched_signals = []
+
+        for raw_sig in signals:
+            # Expand pattern signals or resolve bit-ranges for direct signals
+            for matched_name in self.expand_raw_signals([raw_sig]):
+                normalized = Signal.normalize(matched_name)
+                if normalized not in self.signals:
+                    vidcode = vidcode_map.get(matched_name, -1)
+                    self.signals[normalized] = Signal(
+                        raw_name=matched_name,
+                        vidcode=vidcode,
+                        values=[]
+                    )
+                    matched_signals.append(matched_name)
 
         if not matched_signals:
             print("[WARN] No signals found in FSDB")
             return
 
-        # Build mapping: normalized name (without bitwidth) -> FSDB name (with bitwidth)
-        for sig in matched_signals:
-            normalized = normalize_signal_name(sig)
-            self.signal_name_map[normalized] = sig
-
-        # Get vidcode mapping
-        vidcode_map = self.get_signals_index()
-
         print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB using fsdbdebug...")
 
-        # Initialize cache and timestamps
-        for sig in matched_signals:
-            normalized = normalize_signal_name(sig)
-            self.signal_cache[normalized] = []
         self.timestamps = []
 
         # Extract value changes for each signal
@@ -171,14 +140,10 @@ class FsdbBuilder:
 
         # Second pass: extract value changes
         for sig in matched_signals:
-            normalized = normalize_signal_name(sig)
-            vidcode = vidcode_map.get(sig, -1)
-
-            # Get bit width for this signal
-            left, right = self.signal_widths.get(sig, (0, 0))
-            bit_width = abs(left - right) + 1
-
-            cmd = ['fsdbdebug', '-vc', '-vidcode', str(vidcode), str(self.fsdb_file.absolute())]
+            normalized = Signal.normalize(sig)
+            signal_obj = self.signals[normalized]
+            
+            cmd = ['fsdbdebug', '-vc', '-vidcode', str(signal_obj.vidcode), str(self.fsdb_file.absolute())]
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   universal_newlines=True, timeout=120)
 
@@ -200,7 +165,7 @@ class FsdbBuilder:
                     time_val = int(match.group(1))
                     binary_val = match.group(2)
                     # Convert binary to hex with proper padding
-                    hex_val = self._binary_to_hex(binary_val, bit_width)
+                    hex_val = Signal.binary_to_hex(binary_val, signal_obj.bit_width)
                     vc_data[time_val] = hex_val
                     time_set.add(time_val)
 
@@ -209,21 +174,12 @@ class FsdbBuilder:
         # Build unified time series
         self.timestamps = sorted(list(time_set))
 
-        # Fill signal cache with values at each timestamp (forward-fill)
+        # Fill Signal objects with values at each timestamp (forward-fill)
         for sig in matched_signals:
-            normalized = normalize_signal_name(sig)
+            normalized = Signal.normalize(sig)
+            signal_obj = self.signals[normalized]
             vc_data = all_vc_data.get(normalized, {})
-
-            # Get bit width for proper initial value padding
-            left, right = self.signal_widths.get(sig, (0, 0))
-            bit_width = abs(left - right) + 1
-            hex_chars = (bit_width + 3) // 4  # Round up to nearest hex char
-            current_val = '0' * hex_chars if hex_chars > 0 else '0'  # Default padded initial value
-
-            for time in self.timestamps:
-                if time in vc_data:
-                    current_val = vc_data[time]
-                self.signal_cache[normalized].append(current_val)
+            signal_obj.set_waveform(self.timestamps, vc_data)
 
         # Write verbose output if enabled
         if self.verbose and self.output_dir:
@@ -237,7 +193,8 @@ class FsdbBuilder:
                 # Write header
                 header = "Time".ljust(15)
                 for sig in signals:
-                    sig_name = sig.split('.')[-1].split('/')[-1]
+                    normalized = Signal.normalize(sig)
+                    sig_name = normalized.split('.')[-1].split('/')[-1]
                     header += sig_name[:20].ljust(22)
                 f.write(header + '\n')
                 f.write('-' * len(header) + '\n')
@@ -246,10 +203,9 @@ class FsdbBuilder:
                 for idx, time in enumerate(self.timestamps):
                     row = str(time).ljust(15)
                     for sig in signals:
-                        normalized = normalize_signal_name(sig)
-                        if normalized in self.signal_cache:
-                            val = self.signal_cache[normalized][idx] if idx < len(self.signal_cache[normalized]) else '0'
-                            row += val[:20].ljust(22)
+                        normalized = Signal.normalize(sig)
+                        if normalized in self.signals:
+                            row += self.signals[normalized].get_value(idx)[:20].ljust(22)
                         else:
                             row += '0'.ljust(22)
                     f.write(row + '\n')
@@ -258,42 +214,5 @@ class FsdbBuilder:
         except Exception as e:
             print(f"[WARN] Failed to write verbose output: {e}")
 
-    def _binary_to_hex(self, binary_str: str, bit_width: int = 0) -> str:
-        """Convert binary string to hex string (without 0x prefix)
-
-        Args:
-            binary_str: Binary string from FSDB
-            bit_width: Signal bit width for proper padding (0 = no padding)
-
-        Returns:
-            Hex string with proper zero padding based on bit width
-        """
-        # Calculate expected hex character count from bit width
-        expected_hex_chars = (bit_width + 3) // 4 if bit_width > 0 else 0
-
-        # Handle x/z values
-        if 'x' in binary_str.lower() or 'z' in binary_str.lower():
-            # Return as-is for x/z values with padding marker
-            result = '*' + binary_str[:8] if len(binary_str) > 8 else '*' + binary_str
-            # Pad if needed
-            if expected_hex_chars > 0 and len(result) - 1 < expected_hex_chars:
-                result = '*' + binary_str.ljust(expected_hex_chars, 'x')
-            return result
-
-        try:
-            # Pad to multiple of 4 bits
-            padding = (4 - len(binary_str) % 4) % 4
-            binary_str = '0' * padding + binary_str
-            # Convert to hex
-            hex_val = hex(int(binary_str, 2))[2:]  # Remove '0x'
-            hex_val = hex_val.upper()
-
-            # Pad to expected length based on bit width
-            if expected_hex_chars > 0:
-                hex_val = hex_val.zfill(expected_hex_chars)
-
-            return hex_val
-        except ValueError:
-            # Return padded zero on error
-            return '0' * expected_hex_chars if expected_hex_chars > 0 else '0'
+    # Removed _binary_to_hex as it's now in Signal class
 

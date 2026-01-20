@@ -193,7 +193,7 @@ class YamlBuilder:
                 if isinstance(depends, str):
                     task["dependsOn"] = [depends]
 
-        self._validate_dependencies(config["tasks"])
+        self._validate_deps(config["tasks"])
         self.config = config
 
     def resolve_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -369,7 +369,7 @@ class YamlBuilder:
                             f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
                         )
 
-    def _validate_dependencies(self, tasks: List[Dict[str, Any]]) -> None:
+    def _validate_deps(self, tasks: List[Dict[str, Any]]) -> None:
         """Validate task dependency graph and detect cycles"""
         task_map: Dict[str, int] = {}
         for idx, task in enumerate(tasks):

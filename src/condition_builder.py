@@ -28,8 +28,10 @@ class ExpressionEvaluator(ast.NodeVisitor):
     def __init__(self, scope: str, runtime_data: Dict[str, Any]):
         self.scope = scope
         self.signal_values = runtime_data.get("signal_values", {})
+        self.signal_metadata = runtime_data.get("signal_metadata", {})
         self.upstream_row = runtime_data.get("upstream_row", {})
         self.upstream_data = runtime_data.get("upstream_data", {})
+        self._last_bitwidth = 0
 
     def eval(self, expr: str) -> Any:
         """Evaluate expression, handling custom operators"""
@@ -126,6 +128,11 @@ class ExpressionEvaluator(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> Any:
         signal_name = self._get_name(node)
         signal = resolve_signal_path(signal_name, self.scope)
+        
+        # Track bit width for $split
+        if signal in self.signal_metadata:
+            self._last_bitwidth = self.signal_metadata[signal].bit_width
+            
         val_str = self.signal_values.get(signal, "0")
         if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
             return 0
@@ -139,11 +146,11 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 if len(node.args) != 2:
                     raise ValueError("_split() requires exactly 2 arguments")
                 # Reset bit width tracking before visiting the signal argument
-                self._last_dep_bitwidth = 0
+                self._last_bitwidth = 0
                 signal_val = self.visit(node.args[0])
                 num_parts = self.visit(node.args[1])
-                # Use stored bit width if available (from $dep reference)
-                bit_width = getattr(self, '_last_dep_bitwidth', 0)
+                # Use tracked bit width (from visit_Attribute or visit_Name)
+                bit_width = self._last_bitwidth
                 # split_signal returns List[int], so this is type-safe
                 int_values: List[int] = split_signal(hex(signal_val), num_parts, bit_width)
                 result = SignalGroup(values=int_values)
@@ -199,11 +206,8 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     # Store the original hex string length for bit width calculation
                     # This is used by $split to preserve leading zeros
                     clean_str = val_str[2:] if val_str.startswith("0x") else val_str
-                    val_int = int("0x" + clean_str, 16)
-                    # Store bit width as metadata (hack: use tuple to pass both)
-                    # The caller will extract the int value, but _split can use this
-                    self._last_dep_bitwidth = len(clean_str) * 4
-                    return val_int
+                    self._last_bitwidth = len(clean_str) * 4
+                    return int("0x" + clean_str, 16)
 
             raise ValueError(
                 f"Signal '{signal_name}' not found in task '{target_task_id}'. "
@@ -211,6 +215,11 @@ class ExpressionEvaluator(ast.NodeVisitor):
             )
 
         signal = resolve_signal_path(name, self.scope)
+        
+        # Track bit width for $split
+        if signal in self.signal_metadata:
+            self._last_bitwidth = self.signal_metadata[signal].bit_width
+            
         val_str = self.signal_values.get(signal, "0")
         if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
             return 0
@@ -243,7 +252,7 @@ class ExpressionEvaluator(ast.NodeVisitor):
                     val_str = target_capd.get(sig, "0")
                     clean_str = val_str[2:] if val_str.startswith("0x") else val_str
                     val_int = int("0x" + clean_str, 16)
-                    self._last_dep_bitwidth = len(clean_str) * 4
+                    self._last_bitwidth = len(clean_str) * 4
                     break
             else:
                 raise ValueError(

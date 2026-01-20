@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from yaml_builder import YamlBuilder, Task
 from fsdb_builder import FsdbBuilder
 from condition_builder import ConditionBuilder, Condition
-from utils import resolve_signal_path, normalize_signal_name
+from utils import resolve_signal_path, Signal
 
 
 class FsdbAnalyzer:
@@ -185,20 +185,20 @@ class FsdbAnalyzer:
 
         # Load all signals from FSDB cache (already dumped in run())
         # Note: Cache uses normalized names (without bit ranges)
-        signal_data = {}
+        signal_data: Dict[str, Signal] = {}
         for sig in all_signal_names:
             # Normalize signal name by removing bit range
-            normalized_sig = normalize_signal_name(sig)
-            try:
-                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
-            except RuntimeError:
+            normalized_sig = Signal.normalize(sig)
+            if normalized_sig in self.fsdb_builder.signals:
+                signal_data[normalized_sig] = self.fsdb_builder.signals[normalized_sig]
+            else:
                 print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
 
         if not signal_data:
             print("[WARN] No signals loaded for evaluation")
             return []
 
-        max_len = max(len(vals) for vals in signal_data.values())
+        max_len = max(len(signal_obj.values) for signal_obj in signal_data.values())
 
         # Evaluate condition for each time point
         matched_rows = []
@@ -213,11 +213,12 @@ class FsdbAnalyzer:
             try:
                 # Build signal_values for this time point
                 signal_values = {}
-                for sig, vals in signal_data.items():
-                    signal_values[sig] = vals[row_idx] if row_idx < len(vals) else '0'
+                for sig, signal_obj in signal_data.items():
+                    signal_values[sig] = signal_obj.get_value(row_idx)
 
                 runtime_data = {
                     "signal_values": signal_values,
+                    "signal_metadata": signal_data,
                     "upstream_row": {},
                     "upstream_data": {},
                     "vars": {},
@@ -240,13 +241,11 @@ class FsdbAnalyzer:
                     }
                     for sig in signals:
                         # Normalize signal name to match cache keys
-                        normalized_sig = normalize_signal_name(sig)
+                        normalized_sig = Signal.normalize(sig)
                         if normalized_sig in signal_data:
-                            vals = signal_data[normalized_sig]
+                            signal_obj = signal_data[normalized_sig]
                             # Use original signal name (with scope) as key in capd
-                            row_data["capd"][sig] = (
-                                vals[row_idx] if row_idx < len(vals) else "0"
-                            )
+                            row_data["capd"][sig] = signal_obj.get_value(row_idx)
                         # Signal not found in signal_data - skip silently
 
                     # Add current task's captured data to dep_chain
@@ -329,13 +328,13 @@ class FsdbAnalyzer:
 
         # Load all signals
         # Note: Cache uses normalized names (without bit ranges)
-        signal_data = {}
+        signal_data: Dict[str, Signal] = {}
         for sig in all_signal_names:
             # Normalize signal name by removing bit range
-            normalized_sig = normalize_signal_name(sig)
-            try:
-                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
-            except RuntimeError:
+            normalized_sig = Signal.normalize(sig)
+            if normalized_sig in self.fsdb_builder.signals:
+                signal_data[normalized_sig] = self.fsdb_builder.signals[normalized_sig]
+            else:
                 print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
 
         if not signal_data:
@@ -398,11 +397,12 @@ class FsdbAnalyzer:
                 try:
                     # Prepare signal values for this row
                     signal_values = {}
-                    for sig, vals in signal_data.items():
-                        signal_values[sig] = vals[row_idx] if row_idx < len(vals) else '0'
+                    for sig, signal_obj in signal_data.items():
+                        signal_values[sig] = signal_obj.get_value(row_idx)
 
                     runtime_data = {
                         "signal_values": signal_values,
+                        "signal_metadata": signal_data,
                         "upstream_row": upstream_row,
                         "upstream_data": upstream_data,
                         "vars": {},
@@ -535,7 +535,7 @@ class FsdbAnalyzer:
         upstream_fork_path: List[int],
         vars: Dict[str, str],
         templates: List[str],
-        signal_data: Dict[str, List[str]],
+        signal_data: Dict[str, Signal],
         task: Task,
         upstream_row: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -571,11 +571,11 @@ class FsdbAnalyzer:
         # Capture current task's signals
         for sig in signals:
             # Normalize signal name to match cache keys
-            normalized_sig = normalize_signal_name(sig)
+            normalized_sig = Signal.normalize(sig)
             if normalized_sig in signal_data:
-                vals = signal_data[normalized_sig]
+                signal_obj = signal_data[normalized_sig]
                 # Use original signal name (with scope) as key in capd
-                row_data["capd"][sig] = vals[row_idx] if row_idx < len(vals) else "0"
+                row_data["capd"][sig] = signal_obj.get_value(row_idx)
 
         # Build dependency chain: inherit from upstream + add current task
         if upstream_row:
@@ -827,10 +827,8 @@ class FsdbAnalyzer:
         for row_idx in range(len(timestamps)):
             # Get signal values for this time point
             signal_values = {}
-            for signal in self.fsdb_builder.signal_cache:
-                norm_signal = normalize_signal_name(signal)
-                values = self.fsdb_builder.signal_cache[signal]
-                signal_values[norm_signal] = values[row_idx] if row_idx < len(values) else "0"
+            for norm_name, signal_obj in self.fsdb_builder.signals.items():
+                signal_values[norm_name] = signal_obj.get_value(row_idx)
 
             runtime_data = {"signal_values": signal_values}
 

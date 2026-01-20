@@ -3,8 +3,97 @@
 
 
 import re
-from dataclasses import dataclass
-from typing import List, Union, Sequence
+from dataclasses import dataclass, field
+from typing import List, Union, Sequence, Optional, Dict
+
+
+@dataclass
+class Signal:
+    """Represents a signal with its metadata and captured values"""
+    raw_name: str  # Original name from FSDB (may include bitwidth)
+    name: str = field(init=False)  # Normalized name without bit range
+    scope: str = ""
+    msb: int = 0
+    lsb: int = 0
+    vidcode: int = -1
+    values: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Initialize normalized name and other metadata after construction"""
+        self.name = self.normalize(self.raw_name)
+        
+        # Parse MSB/LSB from raw_name if not already set
+        if self.msb == 0 and self.lsb == 0:
+            match = re.search(r'\[(\d+):(\d+)\]$', self.raw_name)
+            if match:
+                self.msb = int(match.group(1))
+                self.lsb = int(match.group(2))
+
+    @staticmethod
+    def normalize(name: str) -> str:
+        """Remove bit range from signal name (e.g., 'sig[127:0]' -> 'sig')"""
+        return re.sub(r'\[\d+:\d+\]$', '', name)
+
+    @property
+    def fsdb_path(self) -> str:
+        """Convert dot notation to FSDB slash format"""
+        # Use raw_name for FSDB operations
+        if self.raw_name.startswith('/'):
+            return self.raw_name
+        return '/' + self.raw_name.replace('.', '/')
+
+    @property
+    def bit_width(self) -> int:
+        """Calculate bit width from MSB and LSB"""
+        return abs(self.msb - self.lsb) + 1
+
+    def get_value(self, time_idx: int) -> str:
+        """Get hex value string at specific time index"""
+        if time_idx < len(self.values):
+            return self.values[time_idx]
+        return "0"
+
+    def get_int_value(self, time_idx: int) -> int:
+        """Get integer value at specific time index"""
+        val_str = self.get_value(time_idx)
+        if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
+            return 0
+        if not val_str.startswith("0x") and not val_str.startswith("0X"):
+            val_str = "0x" + val_str
+        return int(val_str, 16)
+
+    def set_waveform(self, timestamps: List[int], vc_data: Dict[int, str]):
+        """Fill waveform values with forward-fill logic based on global timestamps"""
+        self.values = []
+        bit_width = self.bit_width
+        hex_chars = (bit_width + 3) // 4
+        current_val = '0' * hex_chars if hex_chars > 0 else '0'
+
+        for time in timestamps:
+            if time in vc_data:
+                current_val = vc_data[time]
+            self.values.append(current_val)
+
+    @staticmethod
+    def binary_to_hex(binary_str: str, bit_width: int = 0) -> str:
+        """Convert binary string to hex string (without 0x prefix)"""
+        expected_hex_chars = (bit_width + 3) // 4 if bit_width > 0 else 0
+
+        if 'x' in binary_str.lower() or 'z' in binary_str.lower():
+            result = '*' + binary_str[:8] if len(binary_str) > 8 else '*' + binary_str
+            if expected_hex_chars > 0 and len(result) - 1 < expected_hex_chars:
+                result = '*' + binary_str.ljust(expected_hex_chars, 'x')
+            return result
+
+        try:
+            padding = (4 - len(binary_str) % 4) % 4
+            binary_str = '0' * padding + binary_str
+            hex_val = hex(int(binary_str, 2))[2:].upper()
+            if expected_hex_chars > 0:
+                hex_val = hex_val.zfill(expected_hex_chars)
+            return hex_val
+        except ValueError:
+            return '0' * expected_hex_chars if expected_hex_chars > 0 else '0'
 
 
 @dataclass
@@ -93,20 +182,10 @@ def split_signal(signal_val: str, num_parts: int, bit_width: int = 0) -> List[in
 
 def normalize_signal_name(signal: str) -> str:
     """Remove bit range from signal name for cache lookup
-
-    Args:
-        signal: Signal name that may include bit range (e.g., "sig[127:0]")
-
-    Returns:
-        Normalized signal name without bit range (e.g., "sig")
-
-    Examples:
-        >>> normalize_signal_name("biu_ifu_rd_data[127:0]")
-        'biu_ifu_rd_data'
-        >>> normalize_signal_name("biu_ifu_rd_data")
-        'biu_ifu_rd_data'
+    
+    Deprecated: Use Signal.normalize(signal) instead.
     """
-    return re.sub(r'\[\d+:\d+\]$', '', signal)
+    return Signal.normalize(signal)
 
 
 def verilog_to_int(match) -> str:
