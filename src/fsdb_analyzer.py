@@ -2,10 +2,10 @@
 import argparse
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from yaml_builder import YamlBuilder, Task
 from fsdb_builder import FsdbBuilder
-from condition_builder import ConditionBuilder, Condition
+from cond_builder import ConditionBuilder, Condition
 from utils import resolve_signal_path, Signal
 
 
@@ -34,6 +34,8 @@ class FsdbAnalyzer:
         self.timeout: int  = raw_config["output"]["timeout"]
         self.fsdb_file  = Path(raw_config["fsdbFile"])
         self.output_dir = Path(raw_config["output"]["directory"])
+        self.clock_signal: str = raw_config["globalClock"]
+        self.global_scope: str = raw_config["scope"]
 
         # Step 3: Initialize ConditionBuilder before resolving config
         self.cond_builder = ConditionBuilder()
@@ -48,8 +50,6 @@ class FsdbAnalyzer:
         # Step 5: Resolve config (convert dict tasks to Task objects)
         self.config: Dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
 
-        self.clock_signal: str = self.config["globalClock"]
-        self.global_scope: str = self.config["scope"]
         self.runtime_data: Dict[str, Any] = {}
 
         # Global flush support (will be compiled after signals are dumped)
@@ -868,6 +868,30 @@ class FsdbAnalyzer:
         tasks : List[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
 
+        # Define pattern resolver callback
+        def pattern_resolver(pattern: str) -> Tuple[List[str], List[str]]:
+            if self.fsdb_builder:
+                return self.fsdb_builder.resolve_pattern(pattern, self.global_scope)
+            else:
+                # In deps-only mode, provide a dummy expansion
+                resolved = resolve_signal_path(pattern, self.global_scope)
+                wildcard = re.sub(r'\{[^}]+\}', '{*}', resolved)
+                return [wildcard], []
+
+        # Build all conditions
+        for task in tasks:
+            if task.condition is None:
+                task.condition = self.cond_builder.build(task, pattern_resolver)
+
+        # Build globalFlush condition
+        if "globalFlush" in self.config:
+            flush_config = self.config["globalFlush"]
+            self.gflush_condition = self.cond_builder.build_raw(
+                raw_condition=flush_config["condition"],
+                scope=self.global_scope,
+                pattern_resolver=pattern_resolver
+            )
+
         # Early exit for deps-only mode after graph is generated
         if self.deps_only:
             print("[INFO] Dependency graph generated. Exiting deps-only mode without FSDB analysis.")
@@ -875,27 +899,12 @@ class FsdbAnalyzer:
         if not self.fsdb_builder:
             raise RuntimeError("[ERROR] FsdbBuilder not initialized in deps-only mode")
 
-        # Collect all signals-of-interest from all tasks using YamlBuilder
+        # Collect all signals-of-interest from all tasks
         soi = self.yaml_builder.collect_raw_signals(self.global_scope)
         self.fsdb_builder.dump_signals(soi)
 
-        # Build all conditions after signals are dumped, TODO
-        for task in tasks:
-            if task.condition is None:
-                task.condition = self.cond_builder.build(task, self.fsdb_builder)
-
-        # Build globalFlush condition after signals are dumped
-        if "globalFlush" in self.config:
-            flush_config = self.config["globalFlush"]
-
-            # Build condition directly from raw expression
-            self.gflush_condition = self.cond_builder.build_raw(
-                raw_condition=flush_config["condition"],
-                scope=self.global_scope,
-                fsdb_builder=self.fsdb_builder
-            )
+        if self.gflush_condition:
             print("[INFO] Global flush condition compiled")
-
             # Compute flush boundaries
             self._compute_flush_boundaries()
 

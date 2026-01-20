@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
 from utils import resolve_signal_path
-from condition_builder import Condition
+from cond_builder import Condition
 
 @dataclass
 class Task:
@@ -115,10 +115,10 @@ class YamlBuilder:
                     line_info = f" at line {line + 1}"
             raise ValueError(f"[ERROR] YAML syntax error{line_info}: {e}")
 
-        self._validate_config(config, config_path)
+        self._validate_config(config)
         return config
 
-    def _validate_config(self, config: Dict[str, Any], config_path: str) -> None:
+    def _validate_config(self, config: Dict[str, Any]) -> None:
         """Validate configuration structure"""
         if "fsdbFile" not in config:
             line_info = self._get_line_info("fsdbFile")
@@ -218,7 +218,7 @@ class YamlBuilder:
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
 
-        from condition_builder import ConditionBuilder
+        from cond_builder import ConditionBuilder
 
         all_signals: Set[str] = set()
         tasks: List[Union[Dict[str, Any], Task]] = self.config.get("tasks", [])

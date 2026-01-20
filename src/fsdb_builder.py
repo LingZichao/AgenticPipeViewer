@@ -5,8 +5,8 @@ import os
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Dict
-from utils import Signal
+from typing import List, Dict, Tuple, Optional
+from utils import Signal, resolve_signal_path
 
 
 class FsdbBuilder:
@@ -85,6 +85,42 @@ class FsdbBuilder:
                 match = next((s for s in all_sigs if s == sig or s.startswith(sig + "[")), sig)
                 expanded.append(match)
         return expanded
+
+    def resolve_pattern(self, pattern: str, scope: str = "") -> Tuple[List[str], List[str]]:
+        """Resolve a pattern with variables to matched signal names and variable values
+        
+        Example: "ifu{idx}.vld" -> (['tb.ifu0.vld', 'tb.ifu1.vld'], ['0', '1'])
+        """
+        # Step 1: Resolve pattern with scope, then convert {variable} to {*}
+        resolved_pattern = resolve_signal_path(pattern, scope)
+        var_match = re.search(r'\{(\w+)\}', resolved_pattern)
+        if not var_match:
+            # No pattern variable, just expand as normal
+            expanded = self.expand_raw_signals([resolved_pattern])
+            return expanded, []
+
+        var_name = var_match.group(1)
+        wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', resolved_pattern)
+        expanded_signals = self.expand_raw_signals([wildcard_pattern])
+
+        # Step 2: Build regex to extract variable value from actual signal names
+        # Escape the pattern but keep the variable part as a group
+        extract_regex = re.escape(resolved_pattern).replace(
+            re.escape(f'{{{var_name}}}'), r'([a-zA-Z0-9_$]+)'
+        )
+        # Allow optional bit range at the end
+        extract_regex = f'^{extract_regex}(?:\\[\\d+:\\d+\\])?$'
+
+        # Step 3: Extract variable values and signals
+        matched_signals = []
+        possible_vals = set()
+        for sig in expanded_signals:
+            match = re.match(extract_regex, sig)
+            if match:
+                matched_signals.append(sig)
+                possible_vals.add(match.group(1))
+
+        return matched_signals, sorted(list(possible_vals))
 
     def dump_signals(self, signals: List[str]) -> None:
         """Dump all signals-of-interest using fsdbdebug -vc -vidcode"""

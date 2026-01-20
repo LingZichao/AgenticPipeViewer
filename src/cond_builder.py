@@ -7,7 +7,6 @@ from utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
 
 if TYPE_CHECKING:
     from yaml_builder import Task
-    from fsdb_builder import FsdbBuilder
 
 
 @dataclass
@@ -461,27 +460,24 @@ class ConditionBuilder:
         _, signals, _, _ = parser.parse(condition_str)
         return signals
 
-    def build(self, task: "Task", fsdb_builder: "FsdbBuilder") -> Condition:
+    def build(self, task: "Task", pattern_resolver: Optional[Callable] = None) -> Condition:
         """Build a condition from task"""
         scope = task.scope or ""
         raw_expr = task.raw_condition
-        return self.build_raw(raw_expr, scope, fsdb_builder)
+        return self.build_raw(raw_expr, scope, pattern_resolver)
 
     def build_raw(
         self,
         raw_condition: str,
         scope: str,
-        fsdb_builder: "FsdbBuilder"
+        pattern_resolver: Optional[Callable] = None
     ) -> Condition:
-        """Build condition from raw expression (no Task object required)
-
+        """Build condition from raw expression
+        
         Args:
             raw_condition: Raw condition expression string
             scope: Signal scope for resolution
-            fsdb_builder: FSDB builder for signal expansion
-
-        Returns:
-            Compiled Condition object
+            pattern_resolver: Callback to resolve signal patterns (pattern -> (signals, candidates))
         """
         # Parse and preprocess expression using unified parser
         parser = ConditionParser(scope)
@@ -495,10 +491,15 @@ class ConditionBuilder:
 
         # Pre-compute pattern candidates if needed
         pattern_candidates = None
-        if has_pattern:
-            pattern_candidates = self._compute_pattern_candidates(
-                parser.pattern_signals, pattern_var, scope, fsdb_builder
-            )
+        if has_pattern and pattern_resolver:
+            possible_vals = set()
+
+            for pattern in parser.pattern_signals:
+                # pattern_resolver handles scope resolution and expansion internally
+                _, candidates = pattern_resolver(pattern)
+                possible_vals.update(candidates)
+            
+            pattern_candidates = SignalGroup(values=list(possible_vals))
 
         # Build unified evaluator
         evaluator = self._build_evaluator(
@@ -518,40 +519,6 @@ class ConditionBuilder:
             has_pattern=has_pattern,
             pattern_var=pattern_var,
         )
-
-    def _compute_pattern_candidates(
-        self,
-        patterns: List[str],
-        var_name: str,
-        scope: str,
-        fsdb_builder: "FsdbBuilder",
-    ) -> SignalGroup:
-        """Pre-compute all possible pattern variable values from FSDB
-
-        Uses expand_raw_signals() to get signal names, then extracts variable values
-        using regex pattern matching.
-        """
-        possible_vals = set()
-
-        for pattern in patterns:
-            # Step 1: Resolve pattern with scope, then convert {variable} to {*}
-            resolved_pattern = resolve_signal_path(pattern, scope)
-            wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', resolved_pattern)
-            expanded_signals = fsdb_builder.expand_raw_signals([wildcard_pattern])
-
-            # Step 2: Build regex to extract variable value from actual signal names
-            extract_regex = re.escape(resolved_pattern).replace(
-                re.escape(f'{{{var_name}}}'), r'([a-zA-Z0-9_$]+)'
-            )
-            # Allow optional bit range at the end
-            extract_regex = f'^{extract_regex}(?:\\[\\d+:\\d+\\])?$'
-
-            # Step 3: Extract variable values from matched signals
-            for sig in expanded_signals:
-                match = re.match(extract_regex, sig)
-                if match:
-                    possible_vals.add(match.group(1))
-        return SignalGroup(values=list(possible_vals))
 
     def _build_evaluator(
         self,
