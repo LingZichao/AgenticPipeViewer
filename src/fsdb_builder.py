@@ -6,7 +6,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-from utils import Signal, resolve_signal_path
+from .utils import Signal, resolve_signal_path
 
 
 class FsdbBuilder:
@@ -66,7 +66,7 @@ class FsdbBuilder:
         return {sig: self._signals_vidcode_map.get(sig, -1) for sig in signals}
 
     def get_signal(self, signal: str) -> List[str]:
-        """Get cached signal values"""
+        """Get single cached signal values"""
         if signal in self.signals:
             return self.signals[signal].values
         raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")

@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
-from utils import resolve_signal_path
-from cond_builder import Condition
+from .utils import resolve_signal_path
+from .cond_builder import Condition
 
 @dataclass
 class Task:
@@ -188,9 +188,9 @@ class YamlBuilder:
         self._validate_deps(config["tasks"])
         self.config = config
 
-    def resolve_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def resolve_config(self) -> Dict[str, Any]:
         """Resolve config by converting dict tasks to Task objects"""
-        self.config = config
+        config = self.config
 
         # Convert dict tasks to Task objects
         global_scope = config.get("scope", "")
@@ -218,7 +218,7 @@ class YamlBuilder:
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
 
-        from cond_builder import ConditionBuilder
+        from .cond_builder import ConditionBuilder
 
         all_signals: Set[str] = set()
         tasks: List[Union[Dict[str, Any], Task]] = self.config.get("tasks", [])

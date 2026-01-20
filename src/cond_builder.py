@@ -3,10 +3,10 @@ import re
 import ast
 from typing import Any, Callable, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 from dataclasses import dataclass
-from utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
+from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
 
 if TYPE_CHECKING:
-    from yaml_builder import Task
+    from .yaml_builder import Task
 
 
 @dataclass

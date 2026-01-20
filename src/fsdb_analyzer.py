@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-import argparse
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from yaml_builder import YamlBuilder, Task
-from fsdb_builder import FsdbBuilder
-from cond_builder import ConditionBuilder, Condition
-from utils import resolve_signal_path, Signal
+from typing import Any, Dict, List, Optional, Set, Tuple
+from .yaml_builder import YamlBuilder, Task
+from .fsdb_builder import FsdbBuilder
+from .cond_builder import ConditionBuilder, Condition
+from .utils import resolve_signal_path, Signal
 
 
 class FsdbAnalyzer:
@@ -40,15 +39,7 @@ class FsdbAnalyzer:
         # Step 3: Initialize ConditionBuilder before resolving config
         self.cond_builder = ConditionBuilder()
 
-        # Step 4: Initialize FsdbBuilder only if not in deps-only mode
-        if not deps_only:
-            self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
-        else:
-            # In deps-only mode, skip FSDB initialization
-            self.fsdb_builder = None
-
-        # Step 5: Resolve config (convert dict tasks to Task objects)
-        self.config: Dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
+        self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
 
         self.runtime_data: Dict[str, Any] = {}
 
@@ -864,6 +855,8 @@ class FsdbAnalyzer:
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
+        self.config: Dict[str, Any] = self.yaml_builder.resolve_config()
+
         # Build execution order based on dependencies (always needed for graph export)
         tasks : List[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
@@ -957,45 +950,3 @@ class FsdbAnalyzer:
             print(f"See {trace_report_file} for details.")
             print(f"{'=' * 70}\n")
 
-
-def main() -> None:
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description="Advanced FSDB Signal Analyzer with Complex Conditions",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run with advanced configuration
-  %(prog)s -c ifu_analysis_advanced.yaml
-
-  # Debug mode: limit to first trigger match
-  %(prog)s -c ifu_analysis_advanced.yaml --debug-num 1
-        """,
-    )
-
-    parser.add_argument(
-        "-c", "--config", required=True,
-        help="YAML configuration file path"
-    )
-
-    parser.add_argument(
-        "--deps-only",
-        action="store_true",
-        help="Only generate dependency graph and exit (skip FSDB analysis)",
-    )
-
-    parser.add_argument(
-        "--debug-num",
-        type=int,
-        default=0,
-        help="Limit number of trigger matches for debugging (0 = unlimited)",
-    )
-
-    args = parser.parse_args()
-
-    analyzer = FsdbAnalyzer(args.config, deps_only=args.deps_only, debug_num=args.debug_num)
-    analyzer.run()
-
-
-if __name__ == "__main__":
-    main()
