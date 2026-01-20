@@ -98,6 +98,7 @@ class FsdbBuilder:
         vidcode_map = self.get_signals_index()
         self.signals = {}
         matched_signals = []
+        missing_signals = []
 
         for raw_sig in signals:
             # Expand pattern signals or resolve bit-ranges for direct signals
@@ -105,31 +106,20 @@ class FsdbBuilder:
                 normalized = Signal.normalize(matched_name)
                 if normalized not in self.signals:
                     vidcode = vidcode_map.get(matched_name, -1)
+                    if vidcode == -1:
+                        missing_signals.append(matched_name)
+                        continue
+
                     self.signals[normalized] = Signal(
                         raw_name=matched_name,
                         vidcode=vidcode,
                         values=[]
                     )
-                    matched_signals.append(matched_name)
+                    matched_signals.append(normalized)
 
         if not matched_signals:
             print("[WARN] No signals found in FSDB")
             return
-
-        print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB using fsdbdebug...")
-
-        self.timestamps = []
-
-        # Extract value changes for each signal
-        all_vc_data: Dict[str, Dict[int, str]] = {}  # normalized_sig -> {time_idx: value}
-        time_set = set()
-
-        # First pass: check all signals have vidcode
-        missing_signals = []
-        for sig in matched_signals:
-            vidcode = vidcode_map.get(sig, -1)
-            if vidcode == -1:
-                missing_signals.append(sig)
 
         if missing_signals:
             error_msg = "[ERROR] The following signals do not exist in FSDB:\n"
@@ -138,9 +128,15 @@ class FsdbBuilder:
             error_msg += "\nPlease check your YAML configuration for typos or incorrect signal names."
             raise RuntimeError(error_msg)
 
-        # Second pass: extract value changes
-        for sig in matched_signals:
-            normalized = Signal.normalize(sig)
+        print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB using fsdbdebug...")
+
+        # Extract value changes for each signal
+        all_vc_data: Dict[str, Dict[int, str]] = {}  # normalized_sig -> {time_idx: value}
+        time_set = set()
+        self.timestamps = []
+
+        # pass: extract value changes
+        for normalized in matched_signals:
             signal_obj = self.signals[normalized]
             
             cmd = ['fsdbdebug', '-vc', '-vidcode', str(signal_obj.vidcode), str(self.fsdb_file.absolute())]
@@ -148,7 +144,7 @@ class FsdbBuilder:
                                   universal_newlines=True, timeout=120)
 
             if result.returncode != 0:
-                print(f"[WARN] Failed to dump signal {sig}: {result.stderr}")
+                print(f"[WARN] Failed to dump signal {normalized}: {result.stderr}")
                 continue
 
             # Parse output: "N vc: xtag: (0 time)  val: binary_value"
@@ -175,8 +171,7 @@ class FsdbBuilder:
         self.timestamps = sorted(list(time_set))
 
         # Fill Signal objects with values at each timestamp (forward-fill)
-        for sig in matched_signals:
-            normalized = Signal.normalize(sig)
+        for normalized in matched_signals:
             signal_obj = self.signals[normalized]
             vc_data = all_vc_data.get(normalized, {})
             signal_obj.set_waveform(self.timestamps, vc_data)
@@ -192,9 +187,8 @@ class FsdbBuilder:
             with open(output_file, 'w') as f:
                 # Write header
                 header = "Time".ljust(15)
-                for sig in signals:
-                    normalized = Signal.normalize(sig)
-                    sig_name = normalized.split('.')[-1].split('/')[-1]
+                for norm_name in signals:
+                    sig_name = norm_name.split('.')[-1].split('/')[-1]
                     header += sig_name[:20].ljust(22)
                 f.write(header + '\n')
                 f.write('-' * len(header) + '\n')
@@ -202,10 +196,9 @@ class FsdbBuilder:
                 # Write data rows
                 for idx, time in enumerate(self.timestamps):
                     row = str(time).ljust(15)
-                    for sig in signals:
-                        normalized = Signal.normalize(sig)
-                        if normalized in self.signals:
-                            row += self.signals[normalized].get_value(idx)[:20].ljust(22)
+                    for norm_name in signals:
+                        if norm_name in self.signals:
+                            row += self.signals[norm_name].get_value(idx)[:20].ljust(22)
                         else:
                             row += '0'.ljust(22)
                     f.write(row + '\n')
