@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import subprocess
 import re
+import os
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict
 from utils import Signal
@@ -131,41 +134,22 @@ class FsdbBuilder:
         print(f"[INFO] Dumping {len(matched_signals)} signal(s) from FSDB using fsdbdebug...")
 
         # Extract value changes for each signal
-        all_vc_data: Dict[str, Dict[int, str]] = {}  # normalized_sig -> {time_idx: value}
         time_set = set()
         self.timestamps = []
+        all_vc_data: Dict[str, Dict[int, str]] = {}  # normalized_sig -> {time_idx: value}
 
         # pass: extract value changes
-        for normalized in matched_signals:
-            signal_obj = self.signals[normalized]
-            
-            cmd = ['fsdbdebug', '-vc', '-vidcode', str(signal_obj.vidcode), str(self.fsdb_file.absolute())]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  universal_newlines=True, timeout=120)
+        # Calculate workers: ~16 signals per thread, capped at 32
+        num_workers = min(32, max(1, (len(matched_signals) + 15) // 16))
+        print(f"[INFO] Using {num_workers} threads for parallel dumping ({len(matched_signals)} signals)...")
 
-            if result.returncode != 0:
-                print(f"[WARN] Failed to dump signal {normalized}: {result.stderr}")
-                continue
-
-            # Parse output: "N vc: xtag: (0 time)  val: binary_value"
-            output = result.stderr if result.stderr else result.stdout
-            vc_data = {}
-
-            for line in output.split('\n'):
-                if 'vc:' not in line or 'xtag:' not in line or 'val:' not in line:
-                    continue
-
-                # Parse: "N vc: xtag: (0 time)  val: binary_value"
-                match = re.search(r'xtag:\s*\(\s*\d+\s+(\d+)\)\s+val:\s*([01xzXZ]+)', line)
-                if match:
-                    time_val = int(match.group(1))
-                    binary_val = match.group(2)
-                    # Convert binary to hex with proper padding
-                    hex_val = Signal.binary_to_hex(binary_val, signal_obj.bit_width)
-                    vc_data[time_val] = hex_val
-                    time_set.add(time_val)
-
-            all_vc_data[normalized] = vc_data
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_norm = {executor.submit(self._dump_single_signal, norm): norm for norm in matched_signals}
+            for future in concurrent.futures.as_completed(future_to_norm):
+                normalized, vc_data, local_time_set = future.result()
+                if vc_data:
+                    all_vc_data[normalized] = vc_data
+                    time_set.update(local_time_set)
 
         # Build unified time series
         self.timestamps = sorted(list(time_set))
@@ -179,6 +163,35 @@ class FsdbBuilder:
         # Write verbose output if enabled
         if self.verbose and self.output_dir:
             self._write_verbose_output(matched_signals)
+
+    def _dump_single_signal(self, normalized: str):
+        """Internal helper for parallel signal dumping"""
+        signal_obj = self.signals[normalized]
+        cmd = ['fsdbdebug', '-vc', '-vidcode', str(signal_obj.vidcode), str(self.fsdb_file.absolute())]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=120)
+
+        if result.returncode != 0:
+            print(f"[WARN] Failed to dump signal {normalized}: {result.stderr}")
+            return normalized, {}, set()
+
+        output = result.stderr if result.stderr else result.stdout
+        vc_data = {}
+        local_time_set = set()
+
+        for line in output.split('\n'):
+            if 'vc:' not in line or 'xtag:' not in line or 'val:' not in line:
+                continue
+
+            match = re.search(r'xtag:\s*\(\s*\d+\s+(\d+)\)\s+val:\s*([01xzXZ]+)', line)
+            if match:
+                time_val = int(match.group(1))
+                binary_val = match.group(2)
+                hex_val = Signal.binary_to_hex(binary_val, signal_obj.bit_width)
+                vc_data[time_val] = hex_val
+                local_time_set.add(time_val)
+
+        return normalized, vc_data, local_time_set
 
     def _write_verbose_output(self, signals: List[str]) -> None:
         """Write signal dump to file in verbose mode"""
