@@ -181,7 +181,7 @@ class FsdbAnalyzer:
                 raw_signal_patterns.add(tmpl)
 
         # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
+        all_signal_names = self.fsdb_builder.expand_pattern(list(raw_signal_patterns))
 
         # Load all signals from FSDB cache (already dumped in run())
         # Note: Cache uses normalized names (without bit ranges)
@@ -324,7 +324,7 @@ class FsdbAnalyzer:
                 raw_signal_patterns.add(tmpl)
 
         # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
+        all_signal_names = self.fsdb_builder.expand_pattern(list(raw_signal_patterns))
 
         # Load all signals
         # Note: Cache uses normalized names (without bit ranges)

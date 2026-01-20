@@ -71,7 +71,7 @@ class FsdbBuilder:
             return self.signals[signal].values
         raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")
 
-    def expand_raw_signals(self, raw_signals: List[str]) -> List[str]:
+    def expand_pattern(self, raw_signals: List[str]) -> List[str]:
         """Expand patterns and resolve bit-ranges for a list of signals"""
         all_sigs = self.get_signals_index().keys()
         expanded = []
@@ -96,12 +96,12 @@ class FsdbBuilder:
         var_match = re.search(r'\{(\w+)\}', resolved_pattern)
         if not var_match:
             # No pattern variable, just expand as normal
-            expanded = self.expand_raw_signals([resolved_pattern])
+            expanded = self.expand_pattern([resolved_pattern])
             return expanded, []
 
         var_name = var_match.group(1)
         wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', resolved_pattern)
-        expanded_signals = self.expand_raw_signals([wildcard_pattern])
+        expanded_signals = self.expand_pattern([wildcard_pattern])
 
         # Step 2: Build regex to extract variable value from actual signal names
         # Escape the pattern but keep the variable part as a group
@@ -135,7 +135,7 @@ class FsdbBuilder:
 
         for raw_sig in signals:
             # Expand pattern signals or resolve bit-ranges for direct signals
-            for matched_name in self.expand_raw_signals([raw_sig]):
+            for matched_name in self.expand_pattern([raw_sig]):
                 normalized = Signal.normalize(matched_name)
                 if normalized not in self.signals:
                     vidcode = vidcode_map.get(matched_name, -1)
