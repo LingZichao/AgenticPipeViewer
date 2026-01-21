@@ -2,23 +2,54 @@
 import re
 import ast
 from typing import Any, Callable, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
-from dataclasses import dataclass
 from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
 
 if TYPE_CHECKING:
     from .yaml_builder import Task
 
 
-@dataclass
 class Condition:
     """Compiled condition that can be executed with runtime data"""
 
-    raw_expr: str  # Original expression string
-    norm_expr: str  # Normalized expression (Python-compatible)
-    evaluator: Callable[[Dict[str, Any]], bool]  # Evaluation function
-    signals: List[str]  # Signals needed (normalized names with {*})
-    has_pattern: bool  # Whether contains pattern matching {var}
-    pattern_var: str = ""  # Pattern variable name if has_pattern
+    def __init__(
+        self,
+        raw_expr: str,
+        norm_expr: str,
+        evaluator: Callable[[Dict[str, Any]], bool],
+        signals: List[str],
+        has_pattern: bool,
+        pattern_var: str = ""
+    ):
+        self.raw_expr = raw_expr
+        self.norm_expr = norm_expr
+        self.evaluator = evaluator
+        self.signals = signals
+        self.has_pattern = has_pattern
+        self.pattern_var = pattern_var
+
+    def exec(self, runtime_data: Dict[str, Any]) -> bool:
+        """Execute this condition with runtime data
+
+        Args:
+            runtime_data: Dictionary containing:
+                - signal_values: Current time slice signal values
+                - signal_metadata: Signal objects with bit width info
+                - upstream_row: Dependency chain data (optional)
+                - upstream_data: Complete upstream results (optional)
+                - vars: Pattern variable bindings (modified by evaluator)
+
+        Returns:
+            True if condition is satisfied, False otherwise
+
+        Raises:
+            ValueError: If evaluation fails with detailed error context
+        """
+        try:
+            return self.evaluator(runtime_data)
+        except Exception as e:
+            raise ValueError(
+                f"[ERROR] Failed to evaluate condition '{self.raw_expr}': {e}"
+            )
 
 
 class ExpressionEvaluator(ast.NodeVisitor):
@@ -512,12 +543,12 @@ class ConditionBuilder:
         )
 
         return Condition(
-            raw_expr=raw_condition_str,
-            norm_expr=norm_expr,
-            evaluator=evaluator,
-            signals=signals,
-            has_pattern=has_pattern,
-            pattern_var=pattern_var,
+            raw_condition_str,
+            norm_expr,
+            evaluator,
+            signals,
+            has_pattern,
+            pattern_var,
         )
 
     def _build_evaluator(
@@ -578,13 +609,3 @@ class ConditionBuilder:
                 return True  # Return True, let caller handle multiple forks
 
         return evaluator
-
-    def exec(self, condition: Condition, runtime_data: Dict[str, Any]) -> bool:
-        """Execute condition with runtime data"""
-        try:
-            return condition.evaluator(runtime_data)
-        except Exception as e:
-            raise ValueError(
-                f"[ERROR] Failed to evaluate condition '{condition.raw_expr}': {e}"
-            )
-

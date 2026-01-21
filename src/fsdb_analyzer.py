@@ -218,7 +218,7 @@ class FsdbAnalyzer:
                     "vars": {},
                 }
 
-                if self.cond_builder.exec(cond, runtime_data):
+                if cond.exec(runtime_data):
                     # Condition matched! Extract pattern variables
                     vars = runtime_data.get("vars", {})
 
@@ -407,7 +407,7 @@ class FsdbAnalyzer:
                         "vars": {},
                     }
 
-                    condition_result = self.cond_builder.exec(cond, runtime_data)
+                    condition_result = cond.exec(runtime_data)
                     if condition_result:
                         # Check for multiple matched variables (pattern condition with multiple valid values)
                         all_matched = runtime_data.get("_all_matched_vars", {})
@@ -832,7 +832,7 @@ class FsdbAnalyzer:
             runtime_data = {"signal_values": signal_values}
 
             # Check if flush condition is satisfied
-            if self.cond_builder.exec(self.gflush_condition, runtime_data):
+            if self.gflush_condition.exec(runtime_data):
                 flush_time = timestamps[row_idx]
                 self.flush_boundaries.append(flush_time)
 
@@ -863,7 +863,7 @@ class FsdbAnalyzer:
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
-        self.config: Dict[str, Any] = self.yaml_builder.resolve_config()
+        self.config = self.yaml_builder.resolve_config()
 
         # Build execution order based on dependencies (always needed for graph export)
         tasks : List[Task] = self.config.get("tasks", [])
