@@ -126,7 +126,10 @@ class YamlValidator:
     def _validate_output_config(self, config: Dict[str, Any]) -> None:
         """Validate output configuration and create output directory"""
         # Validate timeout
-        if not isinstance(config["output"]["timeout"], int) or config["output"]["timeout"] <= 0:
+        if (
+            not isinstance(config["output"]["timeout"], int)
+            or config["output"]["timeout"] <= 0
+        ):
             raise ValueError("[ERROR] output.timeout must be a positive integer")
 
         # Create output directory

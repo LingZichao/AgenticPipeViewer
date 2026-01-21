@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
 from .utils import resolve_signal_path
-from .cond_builder import Condition
+from .cond_builder import Condition, ConditionBuilder
 from .yaml_validator import YamlValidator
 
 @dataclass
@@ -127,8 +127,6 @@ class YamlBuilder:
         """
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
-
-        from .cond_builder import ConditionBuilder
 
         all_signals: Set[str] = set()
         tasks: List[Union[Dict[str, Any], Task]] = self.config.get("tasks", [])
