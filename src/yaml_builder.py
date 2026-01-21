@@ -6,6 +6,7 @@ from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
 from .utils import resolve_signal_path
 from .cond_builder import Condition
+from .yaml_validator import YamlValidator
 
 @dataclass
 class Task:
@@ -38,7 +39,7 @@ class Task:
         capture = [resolve_signal_path(sig, final_scope) for sig in raw_capture]
 
         return cls(
-            id=data.get("id"),
+            id=data.get("id",""),
             raw_condition=raw_condition,
             capture=capture,
             name=data.get("name"),
@@ -67,17 +68,18 @@ class Task:
 
 
 class YamlBuilder:
-    """YAML configuration loader and validator"""
+    """YAML configuration loader and resolver"""
+    config: Dict[str, Any]
 
     def __init__(self) -> None:
-        self.line_map: Dict[str, int] = {}
-        self.config: Optional[Dict[str, Any]] = None
         self.output_dir: Optional[Path] = None
+        
+        self._validator = YamlValidator()
         self._tasks_resolved: bool = False
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
-        self._extract_line_numbers(config_path)
+        self._validator.extract_line_numbers(config_path)
 
         try:
             with open(config_path, "r") as f:
@@ -91,77 +93,10 @@ class YamlBuilder:
                     line_info = f" at line {line + 1}"
             raise ValueError(f"[ERROR] YAML syntax error{line_info}: {e}")
 
-        self._validate_config(config)
-        return config
-
-    def _validate_config(self, config: Dict[str, Any]) -> None:
-        """Validate configuration structure"""
-        if "fsdbFile" not in config:
-            line_info = self._get_line_info("fsdbFile")
-            raise ValueError(f"[ERROR] Missing required field 'fsdbFile' {line_info}")
-
-        fsdb_path = Path(config["fsdbFile"])
-        if not fsdb_path.exists():
-            raise FileNotFoundError(f"[ERROR] FSDB file not found: {fsdb_path}")
-
-        if not str(fsdb_path).endswith(".fsdb"):
-            print(f"[WARN] Target FSDB file extension is not .fsdb: {fsdb_path}")
-
-        if "tasks" not in config or not config["tasks"]:
-            line_info = self._get_line_info("tasks")
-            raise ValueError(
-                f"[ERROR] Missing 'tasks' field or task list is empty {line_info}"
-            )
-
-        config.setdefault("globalClock", "clk")
-        config.setdefault("scope", "")
-
-        # Validate globalFlush configuration (optional)
-        if "globalFlush" in config:
-            flush_config = config["globalFlush"]
-            if not isinstance(flush_config, dict):
-                raise ValueError("[ERROR] globalFlush must be a dict")
-
-            if "condition" not in flush_config:
-                raise ValueError("[ERROR] globalFlush.condition is required")
-
-            if not isinstance(flush_config["condition"], list):
-                raise ValueError("[ERROR] globalFlush.condition must be a list")
-
-        if "output" not in config:
-            config["output"] = {}
-        config["output"].setdefault("directory", "temp_reports")
-        config["output"].setdefault("verbose", False)
-        config["output"].setdefault("dependency_graph", "deps.png")
-        config["output"].setdefault("timeout", 100)  # Default 100 time units
-
-        # Validate timeout
-        if not isinstance(config["output"]["timeout"], int) or config["output"]["timeout"] <= 0:
-            raise ValueError("[ERROR] output.timeout must be a positive integer")
-
+        self._validator.validate_config(config)
         self.output_dir = Path(config["output"]["directory"])
-        try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            raise RuntimeError(
-                f"[ERROR] Failed to create output directory {self.output_dir}: {e}"
-            )
-
-        for idx, task in enumerate(config["tasks"], 1):
-            self._validate_task(task, idx)
-            # Normalize condition and logging to single string
-            if "condition" in task:
-                task["condition"] = self._normalize(task["condition"])
-            if "logging" in task:
-                task["logging"] = self._normalize(task["logging"])
-            # Normalize dependsOn to list
-            if "dependsOn" in task:
-                depends = task["dependsOn"]
-                if isinstance(depends, str):
-                    task["dependsOn"] = [depends]
-
-        self._validate_deps(config["tasks"])
         self.config = config
+        return config
 
     def resolve_config(self) -> Dict[str, Any]:
         """Resolve config by converting dict tasks to Task objects"""
@@ -233,188 +168,6 @@ class YamlBuilder:
         elif isinstance(value, list):
             return " ".join(line.strip() for line in value if line.strip())
         return str(value)
-
-    def _validate_task(self, task: Dict[str, Any], task_num: int) -> None:
-        """Validate task configuration"""
-        line_info = self._get_line_info(f"tasks[{task_num - 1}]")
-
-        def require_nonempty(value: Any, field_name: str) -> None:
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"[ERROR] Task {task_num} '{field_name}' must be non-empty string{line_info}"
-                )
-
-        # id is required
-        if "id" not in task:
-            raise ValueError(
-                f"[ERROR] Task {task_num} missing required field 'id'{line_info}"
-            )
-
-        task_id = task["id"]
-        require_nonempty(task_id, "id")
-        if not task_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' id contains invalid characters{line_info}"
-            )
-
-        task_identifier = task_id
-
-        if "name" in task:
-            require_nonempty(task["name"], "name")
-
-        if "scope" in task:
-            require_nonempty(task["scope"], "scope")
-
-        if "dependsOn" in task:
-            depends = task["dependsOn"]
-            if isinstance(depends, str):
-                require_nonempty(depends, "dependsOn")
-            elif isinstance(depends, list):
-                if not depends:
-                    raise ValueError(
-                        f"[ERROR] Task '{task_identifier}' 'dependsOn' list cannot be empty{line_info}"
-                    )
-                for dep_id in depends:
-                    if not isinstance(dep_id, str) or not dep_id.strip():
-                        raise ValueError(
-                            f"[ERROR] Task '{task_identifier}' 'dependsOn' contains invalid dependency{line_info}"
-                        )
-            else:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' 'dependsOn' must be string or list{line_info}"
-                )
-
-        if "condition" not in task:
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' missing 'condition' field{line_info}"
-            )
-
-        condition = task["condition"]
-        if isinstance(condition, str):
-            require_nonempty(condition, "condition")
-        elif isinstance(condition, list):
-            if not condition:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' 'condition' list cannot be empty{line_info}"
-                )
-            for line in condition:
-                if not isinstance(line, str) or not line.strip():
-                    raise ValueError(
-                        f"[ERROR] Task '{task_identifier}' 'condition' contains invalid line{line_info}"
-                    )
-        else:
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' 'condition' must be string or list of strings{line_info}"
-            )
-
-        capture = task.get("capture", [])
-        if not capture:
-            print(
-                f"[WARN] Task '{task_identifier}' has no signals specified in 'capture' field{line_info}"
-            )
-        elif not isinstance(capture, list):
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' 'capture' field must be a list{line_info}"
-            )
-        else:
-            for idx, sig in enumerate(capture):
-                if isinstance(sig, str):
-                    if not sig or sig.isspace():
-                        raise ValueError(
-                            f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
-                        )
-
-        # Validate matchMode
-        if "matchMode" in task:
-            match_mode = task["matchMode"]
-            valid_modes = ("first", "all", "unique_per_var")
-            if match_mode not in valid_modes:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' has invalid matchMode '{match_mode}'{line_info}. "
-                    f"Valid options: {', '.join(valid_modes)}"
-                )
-
-        # Validate maxMatch
-        if "maxMatch" in task:
-            max_match = task["maxMatch"]
-            if not isinstance(max_match, int) or max_match < 0:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' has invalid maxMatch '{max_match}'{line_info}. "
-                    f"Must be a non-negative integer (0 = unlimited)"
-                )
-
-    def _validate_deps(self, tasks: List[Dict[str, Any]]) -> None:
-        """Validate task dependency graph and detect cycles"""
-        task_map: Dict[str, int] = {}
-        for idx, task in enumerate(tasks):
-            task_id = task.get("id")
-            if not task_id:
-                continue
-            if task_id in task_map:
-                raise ValueError(f"[ERROR] Duplicate task id '{task_id}' found")
-            task_map[task_id] = idx
-
-        for idx, task in enumerate(tasks):
-            task_display_name = task.get("name") or task.get("id") or f"Task {idx + 1}"
-            for dep_id in task.get("dependsOn", []):
-                if dep_id not in task_map:
-                    raise ValueError(
-                        f"[ERROR] Task '{task_display_name}' depends on non-existent task '{dep_id}'"
-                    )
-
-        visited: Set[int] = set()
-        rec_stack: Set[int] = set()
-
-        def has_cycle(task_idx: int, path: List[str]) -> bool:
-            visited.add(task_idx)
-            rec_stack.add(task_idx)
-            path.append(tasks[task_idx].get("id", f"task_{task_idx}"))
-
-            for dep_id in tasks[task_idx].get("dependsOn", []):
-                dep_idx = task_map[dep_id]
-                if dep_idx not in visited:
-                    if has_cycle(dep_idx, path):
-                        return True
-                elif dep_idx in rec_stack:
-                    cycle_start = path.index(dep_id)
-                    cycle = " -> ".join(path[cycle_start:] + [dep_id])
-                    raise ValueError(f"[ERROR] Circular dependency detected: {cycle}")
-
-            path.pop()
-            rec_stack.remove(task_idx)
-            return False
-
-        for idx in range(len(tasks)):
-            if idx not in visited:
-                has_cycle(idx, [])
-
-    def _extract_line_numbers(self, config_path: str) -> None:
-        """Extract line numbers for all keys in YAML file"""
-        try:
-            with open(config_path, "r") as f:
-                lines = f.readlines()
-
-            for line_num, line in enumerate(lines, 1):
-                stripped = line.lstrip()
-                if stripped and not stripped.startswith("#") and ":" in stripped:
-                    key = stripped.split(":")[0].strip()
-                    if key.startswith("- "):
-                        continue
-                    self.line_map[key] = line_num
-        except Exception:
-            pass
-
-    def _get_line_info(self, key_path: str) -> str:
-        """Get line information for error messages"""
-        parts = key_path.replace("[", ".").replace("]", "").split(".")
-
-        for part in reversed(parts):
-            if part.isdigit():
-                continue
-            if part in self.line_map:
-                return f" (line {self.line_map[part]})"
-
-        return ""
 
     def build_exec_order(self) -> List[int]:
         """Build topologically sorted task execution order and export dependency graph"""
