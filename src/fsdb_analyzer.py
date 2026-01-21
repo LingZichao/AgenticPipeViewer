@@ -144,7 +144,9 @@ class FsdbAnalyzer:
 
     def _trace_trigger(self, task: Task) -> List[Dict[str, Any]]:
         """Trigger mode: match conditions globally, each match starts new trace"""
-        templates = task.capture
+        # Extract templates from Signal/PatternSignal objects
+        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
+                    for sig in task.capture_signals]
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
         # Debug mode message
@@ -155,33 +157,22 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Collect all signals needed (from condition + capture templates)
-        raw_signal_patterns = set()
+        # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
+        signal_data: Dict[str, Signal] = {
+            Signal.normalize(sig.raw_name): sig
+            for sig in task.capture_signals
+        }
 
-        # Add condition signals (already normalized with {*} wildcards)
-        raw_signal_patterns.update(cond.signals)
-
-        # Expand capture templates with {*} wildcards
-        for tmpl in templates:
-            if "{" in tmpl:
-                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
-                raw_signal_patterns.add(wildcard)
-            else:
-                raw_signal_patterns.add(tmpl)
-
-        # Expand {*} patterns to actual signal names
-        all_signal_names = self.yaml_builder.fsdb_builder.expand_pattern(list(raw_signal_patterns))
-
-        # Load all signals from FSDB cache (already dumped in run())
-        # Note: Cache uses normalized names (without bit ranges)
-        signal_data: Dict[str, Signal] = {}
-        for sig in all_signal_names:
-            # Normalize signal name by removing bit range
-            normalized_sig = Signal.normalize(sig)
-            if normalized_sig in self.yaml_builder.fsdb_builder.signals:
-                signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
-            else:
-                print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
+        # Also need signals from condition (expand and load)
+        for cond_sig in cond.signals:
+            # Expand condition signal patterns
+            expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
+            for sig in expanded:
+                normalized_sig = Signal.normalize(sig)
+                if normalized_sig in self.yaml_builder.fsdb_builder.signals:
+                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
+                else:
+                    print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
 
         if not signal_data:
             print("[WARN] No signals loaded for evaluation")
@@ -276,7 +267,9 @@ class FsdbAnalyzer:
         - "all": Capture ALL matches in time window (default)
         - "unique_per_var": One match per unique pattern variable combination
         """
-        templates = task.capture
+        # Extract templates from Signal/PatternSignal objects
+        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
+                    for sig in task.capture_signals]
         depends = task.deps
         dep_id = depends[0] if depends else None
         match_mode = task.match_mode  # "first", "all", "unique_per_var"
@@ -303,33 +296,22 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Collect all signals needed (from condition + capture templates)
-        raw_signal_patterns = set()
+        # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
+        signal_data: Dict[str, Signal] = {
+            Signal.normalize(sig.raw_name): sig
+            for sig in task.capture_signals
+        }
 
-        # Add condition signals (already normalized with {*} wildcards)
-        raw_signal_patterns.update(cond.signals)
-
-        # Expand capture templates with {*} wildcards
-        for tmpl in templates:
-            if "{" in tmpl:
-                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
-                raw_signal_patterns.add(wildcard)
-            else:
-                raw_signal_patterns.add(tmpl)
-
-        # Expand {*} patterns to actual signal names
-        all_signal_names = self.yaml_builder.fsdb_builder.expand_pattern(list(raw_signal_patterns))
-
-        # Load all signals
-        # Note: Cache uses normalized names (without bit ranges)
-        signal_data: Dict[str, Signal] = {}
-        for sig in all_signal_names:
-            # Normalize signal name by removing bit range
-            normalized_sig = Signal.normalize(sig)
-            if normalized_sig in self.yaml_builder.fsdb_builder.signals:
-                signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
-            else:
-                print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
+        # Also need signals from condition (expand and load)
+        for cond_sig in cond.signals:
+            # Expand condition signal patterns
+            expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
+            for sig in expanded:
+                normalized_sig = Signal.normalize(sig)
+                if normalized_sig in self.yaml_builder.fsdb_builder.signals:
+                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
+                else:
+                    print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
 
         if not signal_data:
             print("[WARN] No signals loaded for condition evaluation")
@@ -794,6 +776,10 @@ class FsdbAnalyzer:
 
     def _capture_task(self, task: Task) -> str:
         """Execute capture mode task"""
+        # Extract templates from Signal/PatternSignal objects
+        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
+                    for sig in task.capture_signals]
+        
         # Detect trace mode using pre-analyzed flag
         if task.deps:
             # Trace: match from upstream
@@ -805,7 +791,7 @@ class FsdbAnalyzer:
         # Store to memory
         self.runtime_data[task.id] = {
             "rows": matched_rows,
-            "capd": task.capture,  # All captured signals are available for reference
+            "capd": templates,  # All captured signal templates available for reference
         }
 
         print(f"Matched {len(matched_rows)} rows")

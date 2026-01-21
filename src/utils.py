@@ -6,28 +6,44 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Union, Sequence, Optional, Dict
 
-
-@dataclass
 class Signal:
     """Represents a signal with its metadata and captured values"""
     raw_name: str  # Original name from FSDB (may include bitwidth)
-    name: str = field(init=False)  # Normalized name without bit range
-    scope: str = ""
-    msb: int = 0
-    lsb: int = 0
-    vidcode: int = -1
-    values: List[str] = field(default_factory=list)
+    scope: str
+    name: str  # Normalized name without bit range
+    msb: int
+    lsb: int
+    vidcode: int
+    values: List[str]
 
-    def __post_init__(self):
-        """Initialize normalized name and other metadata after construction"""
-        self.name = self.normalize(self.raw_name)
+    def __init__(self, raw_name: str, scope: str = ""):
+        """Initialize Signal from raw name and scope
         
-        # Parse MSB/LSB from raw_name if not already set
-        if self.msb == 0 and self.lsb == 0:
-            match = re.search(r'\[(\d+):(\d+)\]$', self.raw_name)
-            if match:
-                self.msb = int(match.group(1))
-                self.lsb = int(match.group(2))
+        Args:
+            raw_name: Original signal name (may include bit range like [127:0])
+            scope: Signal scope path
+        """
+        self.raw_name = raw_name
+        self.scope = scope
+        self.name = self.normalize(raw_name)
+        self.msb = 0
+        self.lsb = 0
+        self.vidcode = -1
+        self.values = []
+        
+        # Parse MSB/LSB from raw_name
+        match = re.search(r'\[(\d+):(\d+)\]$', self.raw_name)
+        if match:
+            self.msb = int(match.group(1))
+            self.lsb = int(match.group(2))
+
+    def is_pattern(self) -> bool:
+        """Check if this is a pattern signal (False for base Signal)"""
+        return False
+    
+    def get_template(self) -> str:
+        """Get template string for expansion (returns raw_name for regular Signal)"""
+        return self.raw_name
 
     @staticmethod
     def normalize(name: str) -> str:
@@ -96,7 +112,6 @@ class Signal:
             return '0' * expected_hex_chars if expected_hex_chars > 0 else '0'
 
 
-@dataclass
 class SignalGroup:
     """Represents a group of signal values or pattern variable captures
 
@@ -126,6 +141,162 @@ class SignalGroup:
             raise ValueError("SignalGroup is empty")
         else:
             raise ValueError(f"SignalGroup has multiple values: {self.values}")
+
+
+class PatternSignal(Signal):
+    """Pattern signal that extends Signal with variable binding support
+
+    Inherits all Signal functionality and adds:
+    - Pattern variable extraction and binding
+    - Wildcard pattern normalization
+    - Candidate value tracking
+    - Template expansion with matched variables
+
+    A PatternSignal captures the structure of signals with placeholders,
+    their normalized wildcard form, and the candidate values discovered
+    from the FSDB.
+
+    Lifecycle:
+    1. Created from template string (e.g., "signal{idx}_data")
+    2. Normalized to wildcard pattern (e.g., "signal{*}_data")
+    3. Resolved against FSDB to find candidate values (e.g., ["0", "1", "2"])
+    4. Expanded at runtime with bound variable (e.g., idx="1" → "signal1_data")
+
+    Example:
+        >>> ps = PatternSignal(template="icache_line{bank}_valid")
+        >>> ps.variable_name  # "bank"
+        >>> ps.wildcard_pattern  # "icache_line{*}_valid"
+        >>> ps.set_candidates(["0", "1", "2", "3"])
+        >>> ps.expand({"bank": "2"})  # "icache_line2_valid"
+    """
+
+    def __init__(self, template: str, scope: str = ""):
+        """Initialize PatternSignal from template string
+
+        Args:
+            template: Signal template with {var} pattern (e.g., "signal{idx}_data")
+            scope: Signal scope
+        """
+        # Extract variable name
+        var_match = re.search(r'\{(\w+)\}', template)
+        if not var_match:
+            raise ValueError(f"No pattern variable found in template: {template}")
+
+        self.template = template
+        self.variable_name = var_match.group(1)
+        self.wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', template)
+
+        # Store pattern-specific fields
+        self.candidates: List[str] = []
+        self.resolved_signals: List[Signal] = []  # Actual Signal objects after FSDB expansion
+
+        # Initialize parent Signal with wildcard pattern as raw_name
+        super().__init__(raw_name=self.wildcard_pattern, scope=scope)
+
+    def is_pattern(self) -> bool:
+        """Check if this is a pattern signal (always True for PatternSignal)"""
+        return True
+    
+    def get_template(self) -> str:
+        """Get template string for expansion"""
+        return self.template
+
+    def has_variable(self) -> bool:
+        """Check if this is a pattern signal (always True for PatternSignal)"""
+        return True
+
+    def set_candidates(self, candidate_values: List[str], signal_objects: Optional[List[Signal]] = None):
+        """Set candidate values and their corresponding Signal objects
+
+        Args:
+            candidate_values: List of possible values for pattern variable
+            signal_objects: List of actual Signal objects after FSDB expansion
+        """
+        self.candidates = sorted(candidate_values)
+        if signal_objects:
+            self.resolved_signals = signal_objects
+
+    def get_resolved_signal(self, var_bindings: Dict[str, str]) -> Optional[Signal]:
+        """Get the actual Signal object for the expanded template
+
+        Args:
+            var_bindings: Dictionary mapping variable names to values
+
+        Returns:
+            Signal object matching the expanded template, or None if not found
+        """
+        expanded_name = self.expand(var_bindings)
+        for sig in self.resolved_signals:
+            if sig.raw_name == expanded_name or sig.name == Signal.normalize(expanded_name):
+                return sig
+        return None
+
+    def expand(self, var_bindings: Dict[str, str]) -> str:
+        """Expand template with bound variable value
+
+        Args:
+            var_bindings: Dictionary mapping variable names to values
+
+        Returns:
+            Expanded signal name with variable substituted
+
+        Example:
+            >>> ps = PatternSignal("signal{idx}_data")
+            >>> ps.expand({"idx": "2"})
+            "signal2_data"
+        """
+        if self.variable_name not in var_bindings:
+            raise ValueError(
+                f"Variable '{self.variable_name}' not found in bindings: {var_bindings}"
+            )
+
+        value = var_bindings[self.variable_name]
+        return self.template.replace(f"{{{self.variable_name}}}", value)
+
+    def expand_all(self) -> List[str]:
+        """Expand template with all candidate values
+
+        Returns:
+            List of all possible signal names
+
+        Example:
+            >>> ps = PatternSignal("signal{idx}_data")
+            >>> ps.set_candidates(["0", "1", "2"])
+            >>> ps.expand_all()
+            ["signal0_data", "signal1_data", "signal2_data"]
+        """
+        return [
+            self.template.replace(f"{{{self.variable_name}}}", val)
+            for val in self.candidates
+        ]
+
+    def get_candidate_group(self) -> SignalGroup:
+        """Get candidates as a SignalGroup for filtering/testing
+
+        Returns:
+            SignalGroup containing all candidate values
+        """
+        return SignalGroup(values=self.candidates)
+
+    def validate_value(self, value: str) -> bool:
+        """Check if a value is a valid candidate
+
+        Args:
+            value: Candidate value to check
+
+        Returns:
+            True if value is in candidates list
+        """
+        return value in self.candidates
+
+    def __repr__(self) -> str:
+        """String representation for debugging"""
+        cand_preview = self.candidates[:3] if len(self.candidates) <= 3 else self.candidates[:3] + ["..."]
+        return (
+            f"PatternSignal(template='{self.template}', "
+            f"var='{self.variable_name}', "
+            f"candidates={cand_preview})"
+        )
 
 
 def resolve_signal_path(signal: str, scope: str) -> str:
@@ -179,14 +350,6 @@ def split_signal(signal_val: str, num_parts: int, bit_width: int = 0) -> List[in
     bits_per_part = total_bits // num_parts
     mask = (1 << bits_per_part) - 1
     return [(val_int >> (i * bits_per_part)) & mask for i in range(num_parts)]
-
-def normalize_signal_name(signal: str) -> str:
-    """Remove bit range from signal name for cache lookup
-    
-    Deprecated: Use Signal.normalize(signal) instead.
-    """
-    return Signal.normalize(signal)
-
 
 def verilog_to_int(match) -> str:
     parts = match.group(0).split("'")

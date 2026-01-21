@@ -4,17 +4,22 @@ import re
 from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
-from .utils import resolve_signal_path
+from .utils import resolve_signal_path, Signal, PatternSignal
 from .cond_builder import Condition, ConditionBuilder
 from .yaml_validator import YamlValidator
 from .fsdb_builder import FsdbBuilder
 
 @dataclass
 class Task:
-    """Task configuration data structure"""
+    """Task configuration data structure
+
+    Capture signals are parsed at YAML load time:
+    - Regular signals → Signal objects
+    - Pattern signals (with {var}) → PatternSignal objects
+    """
 
     id: str
-    capture: List[str]
+    capture_signals: List[Union[Signal, PatternSignal]]  # Parsed from YAML capture field
     raw_condition: str
 
     name: Optional[str] = None
@@ -28,7 +33,10 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], global_scope: str) -> "Task":
-        """Create Task from dictionary with all preprocessing"""
+        """Create Task from dictionary with all preprocessing
+        
+        Parses capture strings into Signal/PatternSignal objects at load time.
+        """
         task_scope = data.get("scope", "")
         # Calculate final scope: task scope overrides global scope
         final_scope = task_scope if task_scope else global_scope
@@ -36,13 +44,22 @@ class Task:
         raw_capture = data.get("capture", [])
         raw_condition = data.get("condition", "")
 
-        # Resolve capture signals with scope
-        capture = [resolve_signal_path(sig, final_scope) for sig in raw_capture]
+        # Resolve capture signals with scope and parse into Signal/PatternSignal objects
+        capture_signals = []
+        for sig in raw_capture:
+            resolved_sig = resolve_signal_path(sig, final_scope)
+            # Check if signal is a pattern (contains {var})
+            if re.search(r'\{\w+\}', resolved_sig):
+                # Create PatternSignal for pattern templates
+                capture_signals.append(PatternSignal(template=resolved_sig, scope=final_scope))
+            else:
+                # Create regular Signal for non-pattern signals
+                capture_signals.append(Signal(raw_name=resolved_sig, scope=final_scope))
 
         return cls(
             id=data.get("id",""),
             raw_condition=raw_condition,
-            capture=capture,
+            capture_signals=capture_signals,
             name=data.get("name"),
             scope=final_scope,
             deps=data.get("dependsOn", []),
@@ -53,9 +70,17 @@ class Task:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert Task to dictionary"""
+        # Extract raw signal names from capture_signals for serialization
+        capture_list = []
+        for sig in self.capture_signals:
+            if sig.is_pattern():
+                capture_list.append(sig.get_template())
+            else:
+                capture_list.append(sig.raw_name)
+        
         result: Dict[str, Any] = {
             "id": self.id,
-            "capture": self.capture,
+            "capture": capture_list,
             "dependsOn": self.deps,
             "condition": self.raw_condition,
         }
@@ -164,6 +189,9 @@ class YamlBuilder:
             soi = self.collect_raw_signals(global_scope)
             self._fsdb_builder.dump_signals(soi)
 
+            # Resolve capture templates to Signal objects (Stage 3)
+            self.resolve_capture_signals()
+
         # Build conditions if cond_builder provided
         gflush_condition: Optional[Condition] = None
         if cond_builder:
@@ -214,11 +242,14 @@ class YamlBuilder:
 
         for task in tasks:
             if isinstance(task, Task):
-                # Collect capture signals
-                for sig in task.capture:
-                    if isinstance(sig, str):
-                        normalized_sig = re.sub(r'\{[^}]+\}', '{*}', sig)
-                        all_signals.add(normalized_sig)
+                # Collect capture signals from Signal/PatternSignal objects
+                for sig in task.capture_signals:
+                    if sig.is_pattern():
+                        # PatternSignal: use wildcard_pattern
+                        all_signals.add(sig.wildcard_pattern)
+                    else:
+                        # Regular Signal: use raw_name
+                        all_signals.add(sig.raw_name)
 
                 # Collect condition signals using ConditionBuilder
                 if task.raw_condition:
@@ -239,6 +270,76 @@ class YamlBuilder:
             all_signals.update(flush_signals)
 
         return list(all_signals)
+
+    def resolve_capture_signals(self) -> None:
+        """Resolve PatternSignal objects and populate their Signal references
+
+        After FSDB dump, this method:
+        - Expands PatternSignal wildcard patterns to find matching signals
+        - Populates PatternSignal.candidates and PatternSignal.resolved_signals
+        - Populates regular Signal objects with waveform data from FSDB cache
+
+        Raises:
+            RuntimeError: If called before FSDB signals are dumped
+        """
+        if not self._fsdb_builder or not self._fsdb_builder.signals:
+            raise RuntimeError("Cannot resolve capture signals before FSDB dump")
+
+        tasks: List[Task] = self.config.get("tasks", [])
+
+        for task in tasks:
+            for sig in task.capture_signals:
+                if sig.is_pattern():
+                    # PatternSignal: expand and link to Signal objects
+                    pattern_sig = sig  # Type hint: this is a PatternSignal
+                    
+                    # Expand wildcard pattern to actual signal names
+                    expanded_names = self._fsdb_builder.expand_pattern([pattern_sig.wildcard_pattern])
+                    
+                    # Extract candidate values (pattern variable values)
+                    candidates = set()
+                    resolved_signals = []
+                    
+                    for sig_name in expanded_names:
+                        # Extract variable value from expanded name
+                        # E.g., template="signal{idx}_data", expanded="signal2_data" → candidate="2"
+                        template = pattern_sig.template
+                        var_name = pattern_sig.variable_name
+                        
+                        # Create regex pattern from template
+                        # Replace {var} with capture group
+                        regex_pattern = re.escape(template).replace(
+                            re.escape(f"{{{var_name}}}"),
+                            r"(\w+)"
+                        )
+                        
+                        match = re.match(regex_pattern, sig_name)
+                        if match:
+                            candidate_value = match.group(1)
+                            candidates.add(candidate_value)
+                            
+                            # Look up Signal object from cache
+                            normalized = Signal.normalize(sig_name)
+                            if normalized in self._fsdb_builder.signals:
+                                resolved_signals.append(self._fsdb_builder.signals[normalized])
+                    
+                    # Populate PatternSignal with candidates and resolved signals
+                    pattern_sig.set_candidates(
+                        candidate_values=list(candidates),
+                        signal_objects=resolved_signals
+                    )
+                else:
+                    # Regular Signal: populate waveform data from FSDB cache
+                    normalized = Signal.normalize(sig.raw_name)
+                    if normalized in self._fsdb_builder.signals:
+                        cached_sig = self._fsdb_builder.signals[normalized]
+                        # Copy waveform data to task's Signal object
+                        sig.vidcode = cached_sig.vidcode
+                        sig.values = cached_sig.values
+                        sig.msb = cached_sig.msb
+                        sig.lsb = cached_sig.lsb
+                    else:
+                        print(f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'")
 
     def _normalize(self, value: Union[str, List[str]]) -> str:
         """Normalize string or list of strings to single space-joined string"""

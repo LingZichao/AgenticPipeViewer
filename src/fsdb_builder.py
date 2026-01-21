@@ -143,11 +143,11 @@ class FsdbBuilder:
                         missing_signals.append(matched_name)
                         continue
 
-                    self.signals[normalized] = Signal(
-                        raw_name=matched_name,
-                        vidcode=vidcode,
-                        values=[]
-                    )
+                    # Create Signal object with basic parameters
+                    sig = Signal(raw_name=matched_name)
+                    # Set additional attributes after creation
+                    sig.vidcode = vidcode
+                    self.signals[normalized] = sig
                     matched_signals.append(normalized)
 
         if not matched_signals:
