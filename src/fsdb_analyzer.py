@@ -800,11 +800,21 @@ class FsdbAnalyzer:
 
         timestamps = self.yaml_builder.fsdb_builder.timestamps
 
+        # Build signal_data from pre-resolved condition signals (same pattern as _trace_trigger/_trace_depends)
+        signal_data: Dict[str, Signal] = {}
+        for sig_obj in self.gflush_condition.signals:
+            normalized_sig = Signal.normalize(sig_obj.raw_name)
+            signal_data[normalized_sig] = sig_obj
+
+        if not signal_data:
+            print("[WARN] No signals loaded for globalFlush condition")
+            return
+
         for row_idx in range(len(timestamps)):
-            # Get signal values for this time point
+            # Build signal values for this time point
             signal_values = {}
-            for norm_name, signal_obj in self.yaml_builder.fsdb_builder._signals.items():
-                signal_values[norm_name] = signal_obj.get_value(row_idx)
+            for sig, signal_obj in signal_data.items():
+                signal_values[sig] = signal_obj.get_value(row_idx)
 
             runtime_data = {"signal_values": signal_values}
 
