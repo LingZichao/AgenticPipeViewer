@@ -19,7 +19,7 @@ class Task:
     """
 
     id: str
-    capture_signals: List[Union[Signal, PatternSignal]]  # Parsed from YAML capture field
+    capture: List[Union[Signal, PatternSignal]]  # Parsed from YAML capture field
     raw_condition: str
 
     name: Optional[str] = None
@@ -72,7 +72,7 @@ class Task:
         """Convert Task to dictionary"""
         # Extract raw signal names from capture_signals for serialization
         capture_list = []
-        for sig in self.capture_signals:
+        for sig in self.capture:
             if sig.is_pattern():
                 capture_list.append(sig.get_template())
             else:
@@ -243,7 +243,7 @@ class YamlBuilder:
         for task in tasks:
             if isinstance(task, Task):
                 # Collect capture signals from Signal/PatternSignal objects
-                for sig in task.capture_signals:
+                for sig in task.capture:
                     if sig.is_pattern():
                         # PatternSignal: use wildcard_pattern
                         all_signals.add(sig.wildcard_pattern)
@@ -288,7 +288,7 @@ class YamlBuilder:
         tasks: List[Task] = self.config.get("tasks", [])
 
         for task in tasks:
-            for sig in task.capture_signals:
+            for sig in task.capture:
                 if sig.is_pattern():
                     # PatternSignal: expand and link to Signal objects
                     pattern_sig = sig  # Type hint: this is a PatternSignal

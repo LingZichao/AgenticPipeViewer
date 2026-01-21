@@ -143,31 +143,30 @@ class SignalGroup:
             raise ValueError(f"SignalGroup has multiple values: {self.values}")
 
 
-class PatternSignal(Signal):
-    """Pattern signal that extends Signal with variable binding support
+class PatternSignal:
+    """Pattern signal factory that generates Signal instances
 
-    Inherits all Signal functionality and adds:
-    - Pattern variable extraction and binding
-    - Wildcard pattern normalization
-    - Candidate value tracking
-    - Template expansion with matched variables
+    Unlike Signal which stores actual waveform data, PatternSignal serves as a 
+    template factory for generating specific Signal instances based on variable bindings.
 
-    A PatternSignal captures the structure of signals with placeholders,
-    their normalized wildcard form, and the candidate values discovered
-    from the FSDB.
+    Key responsibilities:
+    - Parse template patterns with variables (e.g., "signal{idx}_data")
+    - Generate wildcard patterns for FSDB matching (e.g., "signal{*}_data")
+    - Track candidate variable values discovered from FSDB
+    - Create specific Signal instances through template expansion
 
     Lifecycle:
     1. Created from template string (e.g., "signal{idx}_data")
     2. Normalized to wildcard pattern (e.g., "signal{*}_data")
     3. Resolved against FSDB to find candidate values (e.g., ["0", "1", "2"])
-    4. Expanded at runtime with bound variable (e.g., idx="1" → "signal1_data")
+    4. Expanded at runtime to generate specific Signal instances
 
     Example:
         >>> ps = PatternSignal(template="icache_line{bank}_valid")
         >>> ps.variable_name  # "bank"
         >>> ps.wildcard_pattern  # "icache_line{*}_valid"
         >>> ps.set_candidates(["0", "1", "2", "3"])
-        >>> ps.expand({"bank": "2"})  # "icache_line2_valid"
+        >>> signal_instance = ps.generate_signal({"bank": "2"})  # Creates Signal("icache_line2_valid")
     """
 
     def __init__(self, template: str, scope: str = ""):
@@ -183,6 +182,7 @@ class PatternSignal(Signal):
             raise ValueError(f"No pattern variable found in template: {template}")
 
         self.template = template
+        self.scope = scope
         self.variable_name = var_match.group(1)
         self.wildcard_pattern = re.sub(r'\{[^}]+\}', '{*}', template)
 
@@ -190,16 +190,26 @@ class PatternSignal(Signal):
         self.candidates: List[str] = []
         self.resolved_signals: List[Signal] = []  # Actual Signal objects after FSDB expansion
 
-        # Initialize parent Signal with wildcard pattern as raw_name
-        super().__init__(raw_name=self.wildcard_pattern, scope=scope)
-
     def is_pattern(self) -> bool:
         """Check if this is a pattern signal (always True for PatternSignal)"""
         return True
     
+    def get_wildcard_name(self) -> str:
+        """Get the wildcard pattern name for FSDB matching"""
+        return self.wildcard_pattern
+    
     def get_template(self) -> str:
         """Get template string for expansion"""
         return self.template
+    
+    def get_raw_name(self) -> str:
+        """Get raw name (alias for wildcard_pattern for compatibility)"""
+        return self.wildcard_pattern
+    
+    @property
+    def raw_name(self) -> str:
+        """Property alias for get_raw_name() to maintain compatibility"""
+        return self.get_raw_name()
 
     def has_variable(self) -> bool:
         """Check if this is a pattern signal (always True for PatternSignal)"""
@@ -216,8 +226,20 @@ class PatternSignal(Signal):
         if signal_objects:
             self.resolved_signals = signal_objects
 
+    def generate_signal(self, var_bindings: Dict[str, str]) -> Signal:
+        """Generate a specific Signal instance from template with variable bindings
+
+        Args:
+            var_bindings: Dictionary mapping variable names to values
+
+        Returns:
+            New Signal instance with expanded name
+        """
+        expanded_name = self.expand(var_bindings)
+        return Signal(raw_name=expanded_name, scope=self.scope)
+    
     def get_resolved_signal(self, var_bindings: Dict[str, str]) -> Optional[Signal]:
-        """Get the actual Signal object for the expanded template
+        """Get the actual Signal object for the expanded template from resolved cache
 
         Args:
             var_bindings: Dictionary mapping variable names to values

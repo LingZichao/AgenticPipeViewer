@@ -146,7 +146,7 @@ class FsdbAnalyzer:
         """Trigger mode: match conditions globally, each match starts new trace"""
         # Extract templates from Signal/PatternSignal objects
         templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture_signals]
+                    for sig in task.capture]
         print(f"Evaluating condition for {len(templates)} signal(s)")
 
         # Debug mode message
@@ -158,9 +158,11 @@ class FsdbAnalyzer:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
         # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
+        # Only include actual Signal objects, exclude PatternSignal objects
         signal_data: Dict[str, Signal] = {
             Signal.normalize(sig.raw_name): sig
-            for sig in task.capture_signals
+            for sig in task.capture
+            if not sig.is_pattern()
         }
 
         # Also need signals from condition (expand and load)
@@ -269,7 +271,7 @@ class FsdbAnalyzer:
         """
         # Extract templates from Signal/PatternSignal objects
         templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture_signals]
+                    for sig in task.capture]
         depends = task.deps
         dep_id = depends[0] if depends else None
         match_mode = task.match_mode  # "first", "all", "unique_per_var"
@@ -297,9 +299,11 @@ class FsdbAnalyzer:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
         # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
+        # Only include actual Signal objects, exclude PatternSignal objects
         signal_data: Dict[str, Signal] = {
             Signal.normalize(sig.raw_name): sig
-            for sig in task.capture_signals
+            for sig in task.capture
+            if not sig.is_pattern()
         }
 
         # Also need signals from condition (expand and load)
@@ -778,7 +782,7 @@ class FsdbAnalyzer:
         """Execute capture mode task"""
         # Extract templates from Signal/PatternSignal objects
         templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture_signals]
+                    for sig in task.capture]
         
         # Detect trace mode using pre-analyzed flag
         if task.deps:
