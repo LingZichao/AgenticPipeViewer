@@ -208,6 +208,9 @@ class YamlBuilder:
             # Resolve capture templates to Signal objects (Stage 3)
             self.resolve_capture_signals()
             
+            # Resolve condition signals to Signal objects (Stage 3)
+            self.resolve_condition_signals(gflush_condition)
+            
             # Activate pattern conditions with resolved candidates
             for task in task_objects:
                 if task.condition and task.condition.has_pattern:
@@ -357,6 +360,74 @@ class YamlBuilder:
                         sig.lsb = cached_sig.lsb
                     else:
                         print(f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'")
+
+    def resolve_condition_signals(self, gflush_condition: Optional[Condition] = None) -> None:
+        """Resolve condition Signal objects and populate with FSDB waveform data
+
+        After FSDB dump, this method:
+        - Expands PatternSignal wildcard patterns in conditions to actual signal names
+        - Creates Signal objects for expanded signals and populates with waveform data
+        - Replaces Condition.signals list with fully resolved Signal objects
+
+        Args:
+            gflush_condition: Optional globalFlush Condition to also resolve
+
+        Raises:
+            RuntimeError: If called before FSDB signals are dumped
+        """
+        if not self._fsdb_builder or not self._fsdb_builder._signals:
+            raise RuntimeError("Cannot resolve condition signals before FSDB dump")
+
+        tasks: List[Task] = self.config.get("tasks", [])
+
+        # Resolve condition signals for all tasks
+        for task in tasks:
+            if task.condition:
+                self._resolve_condition_for_object(task.condition)
+
+        # Resolve globalFlush condition if provided
+        if gflush_condition:
+            self._resolve_condition_for_object(gflush_condition)
+
+    def _resolve_condition_for_object(self, cond: Condition) -> None:
+        """Helper method to resolve signals for a single Condition object
+
+        Expands patterns and populates Signal objects with waveform data from FSDB cache.
+        Replaces cond.signals list with fully resolved Signal objects.
+
+        Args:
+            cond: Condition object to resolve
+        """
+        resolved_signals: List[Signal] = []
+
+        for sig_obj in cond.signals:
+            if sig_obj.is_pattern():
+                # PatternSignal: expand wildcard pattern to actual signal names
+                expanded_names = self._fsdb_builder.expand_pattern([sig_obj.wildcard_pattern])
+
+                for sig_name in expanded_names:
+                    normalized = Signal.normalize(sig_name)
+                    if normalized in self._fsdb_builder._signals:
+                        # Use cached Signal object with waveform data
+                        resolved_signals.append(self._fsdb_builder._signals[normalized])
+                    else:
+                        print(f"[WARN] Signal '{normalized}' not found in FSDB cache for condition")
+            else:
+                # Regular Signal: populate waveform data from FSDB cache
+                normalized = Signal.normalize(sig_obj.raw_name)
+                if normalized in self._fsdb_builder._signals:
+                    cached_sig = self._fsdb_builder._signals[normalized]
+                    # Copy waveform data to condition's Signal object
+                    sig_obj.vidcode = cached_sig.vidcode
+                    sig_obj.values = cached_sig.values
+                    sig_obj.msb = cached_sig.msb
+                    sig_obj.lsb = cached_sig.lsb
+                    resolved_signals.append(sig_obj)
+                else:
+                    print(f"[WARN] Signal '{normalized}' not found in FSDB cache for condition")
+
+        # Replace Condition.signals with resolved Signal objects
+        cond.signals = resolved_signals
 
     def _normalize(self, value: Union[str, List[str]]) -> str:
         """Normalize string or list of strings to single space-joined string"""

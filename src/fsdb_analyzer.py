@@ -165,22 +165,12 @@ class FsdbAnalyzer:
             if not sig.is_pattern()
         }
 
-        # Also need signals from condition (expand and load)
-        for cond_sig_obj in cond.signals:
-            # Check if it's a PatternSignal or regular Signal
-            if cond_sig_obj.is_pattern():
-                # PatternSignal: expand wildcard pattern
-                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.wildcard_pattern])
-            else:
-                # Regular Signal: expand raw_name (may have bit range)
-                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.raw_name])
-            
-            for sig in expanded:
-                normalized_sig = Signal.normalize(sig)
-                if normalized_sig in self.yaml_builder.fsdb_builder._signals:
-                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder._signals[normalized_sig]
-                else:
-                    print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
+        # Use pre-resolved condition signals from Condition.signals (Stage 3 optimization)
+        # All PatternSignal objects have been expanded to Signal objects in yaml_builder
+        if cond:
+            for sig_obj in cond.signals:
+                normalized_sig = Signal.normalize(sig_obj.raw_name)
+                signal_data[normalized_sig] = sig_obj
 
         if not signal_data:
             print("[WARN] No signals loaded for evaluation")
@@ -312,22 +302,12 @@ class FsdbAnalyzer:
             if not sig.is_pattern()
         }
 
-        # Also need signals from condition (expand and load)
-        for cond_sig_obj in cond.signals:
-            # Check if it's a PatternSignal or regular Signal
-            if cond_sig_obj.is_pattern():
-                # PatternSignal: expand wildcard pattern
-                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.wildcard_pattern])
-            else:
-                # Regular Signal: expand raw_name (may have bit range)
-                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.raw_name])
-            
-            for sig in expanded:
-                normalized_sig = Signal.normalize(sig)
-                if normalized_sig in self.yaml_builder.fsdb_builder._signals:
-                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder._signals[normalized_sig]
-                else:
-                    print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
+        # Use pre-resolved condition signals from Condition.signals (Stage 3 optimization)
+        # All PatternSignal objects have been expanded to Signal objects in yaml_builder
+        if cond:
+            for sig_obj in cond.signals:
+                normalized_sig = Signal.normalize(sig_obj.raw_name)
+                signal_data[normalized_sig] = sig_obj
 
         if not signal_data:
             print("[WARN] No signals loaded for condition evaluation")
