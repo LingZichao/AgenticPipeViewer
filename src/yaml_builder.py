@@ -9,6 +9,7 @@ from .cond_builder import Condition, ConditionBuilder
 from .yaml_validator import YamlValidator
 from .fsdb_builder import FsdbBuilder
 
+
 @dataclass
 class Task:
     """Task configuration data structure
@@ -34,7 +35,7 @@ class Task:
     @classmethod
     def from_dict(cls, data: Dict[str, Any], global_scope: str) -> "Task":
         """Create Task from dictionary with all preprocessing
-        
+
         Parses capture strings into Signal/PatternSignal objects at load time.
         """
         task_scope = data.get("scope", "")
@@ -49,15 +50,17 @@ class Task:
         for sig in raw_capture:
             resolved_sig = resolve_signal_path(sig, final_scope)
             # Check if signal is a pattern (contains {var})
-            if re.search(r'\{\w+\}', resolved_sig):
+            if re.search(r"\{\w+\}", resolved_sig):
                 # Create PatternSignal for pattern templates
-                capture_signals.append(PatternSignal(template=resolved_sig, scope=final_scope))
+                capture_signals.append(
+                    PatternSignal(template=resolved_sig, scope=final_scope)
+                )
             else:
                 # Create one regular Signal for non-pattern signals
                 capture_signals.append(Signal(raw_name=resolved_sig, scope=final_scope))
 
         return cls(
-            id=data.get("id",""),
+            id=data.get("id", ""),
             raw_condition=raw_condition,
             capture=capture_signals,
             name=data.get("name"),
@@ -77,7 +80,7 @@ class Task:
                 capture_list.append(sig.get_template())
             else:
                 capture_list.append(sig.raw_name)
-        
+
         result: Dict[str, Any] = {
             "id": self.id,
             "capture": capture_list,
@@ -95,6 +98,7 @@ class Task:
 
 class YamlBuilder:
     """YAML configuration loader and resolver"""
+
     config: Dict[str, Any]
 
     _fsdb_builder: FsdbBuilder
@@ -200,8 +204,7 @@ class YamlBuilder:
         return self.get_fsdb_builder().output_dir
 
     def resolve_config(
-        self,
-        dump_signals: bool = True
+        self, dump_signals: bool = True
     ) -> Tuple[Dict[str, Any], Optional[Condition]]:
         """Resolve config by converting dict tasks to Task objects and building conditions
 
@@ -222,22 +225,20 @@ class YamlBuilder:
             task_obj = Task.from_dict(task_dict, global_scope)
             # Build Condition immediately (pattern conditions need activation later)
             task_obj.condition = self._cond_builder.build_raw(
-                task_obj.raw_condition,
-                task_obj.scope or global_scope
+                task_obj.raw_condition, task_obj.scope or global_scope
             )
             task_objects.append(task_obj)
 
         config["tasks"] = task_objects
         self._tasks_resolved = True
-        
+
         # Build globalFlush condition early (before dump_signals)
         # This allows collect_raw_signals to use gflush_condition.signals
         gflush_condition: Optional[Condition] = None
         if "globalFlush" in config:
             flush_config = config["globalFlush"]
             gflush_condition = self._cond_builder.build_raw(
-                raw_condition=flush_config["condition"],
-                scope=global_scope
+                raw_condition=flush_config["condition"], scope=global_scope
             )
 
         # Phase 2: Dump signals and activate pattern conditions
@@ -247,17 +248,19 @@ class YamlBuilder:
 
             # Resolve capture templates to Signal objects (Stage 3)
             self.resolve_capture_signals()
-            
+
             # Resolve condition signals to Signal objects (Stage 3)
             self.resolve_condition_signals(gflush_condition)
-            
+
             # Activate pattern conditions with resolved candidates
             for task in task_objects:
                 if task.condition and task.condition.has_pattern:
                     # Resolve all pattern signals and collect unique candidates
                     candidates = set()
                     for pattern in task.condition._pattern_signals:
-                        _, vals = self._fsdb_builder.resolve_pattern(pattern, global_scope)
+                        _, vals = self._fsdb_builder.resolve_pattern(
+                            pattern, global_scope
+                        )
                         candidates.update(vals)
                     task.condition.activate(list(candidates))
 
@@ -272,9 +275,7 @@ class YamlBuilder:
         return config, gflush_condition
 
     def collect_raw_signals(
-        self, 
-        global_scope: str,
-        gflush_condition: Optional[Condition] = None
+        self, global_scope: str, gflush_condition: Optional[Condition] = None
     ) -> List[str]:
         """Collect all raw signals-of-interest from all tasks (capture + condition)
 
@@ -286,7 +287,7 @@ class YamlBuilder:
 
         Returns:
             List of all raw signals (may contain {*} patterns)
-            
+
         Note:
             Must be called after Task.condition is built (after resolve_config Phase 1)
         """
@@ -317,7 +318,9 @@ class YamlBuilder:
                             # Regular Signal: use raw_name
                             all_signals.add(sig_obj.raw_name)
             else:
-                raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
+                raise RuntimeError(
+                    "Tasks must be resolved to Task objects before collecting signals"
+                )
 
         # Collect globalFlush condition signals from pre-built Condition object
         if gflush_condition:
@@ -352,41 +355,44 @@ class YamlBuilder:
                 if sig.is_pattern():
                     # PatternSignal: expand and link to Signal objects
                     pattern_sig = sig  # Type hint: this is a PatternSignal
-                    
+
                     # Expand wildcard pattern to actual signal names
-                    expanded_names = self._fsdb_builder.expand_pattern([pattern_sig.wildcard_pattern])
-                    
+                    expanded_names = self._fsdb_builder.expand_pattern(
+                        [pattern_sig.wildcard_pattern]
+                    )
+
                     # Extract candidate values (pattern variable values)
                     candidates = set()
                     resolved_signals = []
-                    
+
                     for sig_name in expanded_names:
                         # Extract variable value from expanded name
                         # E.g., template="signal{idx}_data", expanded="signal2_data" → candidate="2"
                         template = pattern_sig.template
                         var_name = pattern_sig.variable_name
-                        
+
                         # Create regex pattern from template
                         # Replace {var} with capture group
                         regex_pattern = re.escape(template).replace(
-                            re.escape(f"{{{var_name}}}"),
-                            r"(\w+)"
+                            re.escape(f"{{{var_name}}}"), r"(\w+)"
                         )
-                        
+
                         match = re.match(regex_pattern, sig_name)
                         if match:
                             candidate_value = match.group(1)
                             candidates.add(candidate_value)
-                            
+
                             # Look up Signal object from cache
                             normalized = Signal.normalize(sig_name)
                             if normalized in self._fsdb_builder._signals:
-                                resolved_signals.append(self._fsdb_builder._signals[normalized])
-                    
+                                resolved_signals.append(
+                                    self._fsdb_builder._signals[normalized]
+                                )
+
                     # Populate PatternSignal with candidates and resolved signals
                     pattern_sig.set_candidates(
                         candidate_values=list(candidates),
-                        signal_objects=resolved_signals
+                        signal_objects=resolved_signals,
                     )
                 else:
                     # Regular Signal: populate waveform data from FSDB cache
@@ -399,9 +405,13 @@ class YamlBuilder:
                         sig.msb = cached_sig.msb
                         sig.lsb = cached_sig.lsb
                     else:
-                        print(f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'")
+                        print(
+                            f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'"
+                        )
 
-    def resolve_condition_signals(self, gflush_condition: Optional[Condition] = None) -> None:
+    def resolve_condition_signals(
+        self, gflush_condition: Optional[Condition] = None
+    ) -> None:
         """Resolve condition Signal objects and populate with FSDB waveform data
 
         After FSDB dump, this method:
@@ -443,7 +453,9 @@ class YamlBuilder:
         for sig_obj in cond.signals:
             if sig_obj.is_pattern():
                 # PatternSignal: expand wildcard pattern to actual signal names
-                expanded_names = self._fsdb_builder.expand_pattern([sig_obj.wildcard_pattern])
+                expanded_names = self._fsdb_builder.expand_pattern(
+                    [sig_obj.wildcard_pattern]
+                )
 
                 for sig_name in expanded_names:
                     normalized = Signal.normalize(sig_name)
@@ -451,7 +463,9 @@ class YamlBuilder:
                         # Use cached Signal object with waveform data
                         resolved_signals.append(self._fsdb_builder._signals[normalized])
                     else:
-                        print(f"[WARN] Signal '{normalized}' not found in FSDB cache for condition")
+                        print(
+                            f"[WARN] Signal '{normalized}' not found in FSDB cache for condition"
+                        )
             else:
                 # Regular Signal: populate waveform data from FSDB cache
                 normalized = Signal.normalize(sig_obj.raw_name)
@@ -464,7 +478,9 @@ class YamlBuilder:
                     sig_obj.lsb = cached_sig.lsb
                     resolved_signals.append(sig_obj)
                 else:
-                    print(f"[WARN] Signal '{normalized}' not found in FSDB cache for condition")
+                    print(
+                        f"[WARN] Signal '{normalized}' not found in FSDB cache for condition"
+                    )
 
         # Replace Condition.signals with resolved Signal objects
         cond.signals = resolved_signals
@@ -542,6 +558,7 @@ class YamlBuilder:
         Produces PNG/PDF/SVG without requiring Graphviz 'dot'."""
         try:
             import matplotlib
+
             matplotlib.use("Agg")  # Headless backend for servers/CI
             import matplotlib.pyplot as plt
             import networkx as nx
@@ -604,7 +621,9 @@ class YamlBuilder:
                 pos[node] = (lvl * x_spacing, -idx * y_spacing)
 
         # Draw nodes and edges
-        fig, ax = plt.subplots(figsize=(max(6, len(G.nodes) * 0.8), max(4, len(G.nodes) * 0.6)))
+        fig, ax = plt.subplots(
+            figsize=(max(6, len(G.nodes) * 0.8), max(4, len(G.nodes) * 0.6))
+        )
         nx.draw_networkx_nodes(
             G,
             pos,
@@ -613,7 +632,9 @@ class YamlBuilder:
             node_shape="s",
             ax=ax,
         )
-        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="-|>", arrowsize=16, width=1.8, ax=ax)
+        nx.draw_networkx_edges(
+            G, pos, arrows=True, arrowstyle="-|>", arrowsize=16, width=1.8, ax=ax
+        )
 
         # Labels
         labels = {n: G.nodes[n].get("label", n) for n in G.nodes}
@@ -674,7 +695,9 @@ class YamlBuilder:
         # Pattern explanation:
         # - Signal ref can contain: normal chars, dots, or [msb:lsb] bit ranges
         # - Format spec is optional :x/:X/:b/:d/:o at the end
-        placeholder_pattern = re.compile(r'\{((?:[^}:\[\]]+|\[\d+:\d+\])+)(?::([xXbdo]))?\}')
+        placeholder_pattern = re.compile(
+            r"\{((?:[^}:\[\]]+|\[\d+:\d+\])+)(?::([xXbdo]))?\}"
+        )
 
         # Collect all signal references from log_format and their format specs
         # Key: normalized signal name (last component without bit range)
