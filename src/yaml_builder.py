@@ -610,20 +610,99 @@ class YamlBuilder:
 
         Returns:
             Formatted log message string
+
+        Supports format specifiers for base conversion:
+            {signal:x} - hex format (lowercase)
+            {signal:X} - hex format (uppercase)
+            {signal:b} - binary format
+            {signal:d} - decimal format
+            {signal:o} - octal format
+
+        Signal names in log format can use full paths with dots and brackets:
+            {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]}
+            {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]:x}
         """
+        from .utils import Signal
+
         context: Dict[str, Any] = {"__time__": row_idx}
+
+        # Find all placeholders with format specifiers in the log format
+        # Pattern matches {name} or {name:spec} where name can include [msb:lsb] bit ranges
+        # Pattern explanation:
+        # - Signal ref can contain: normal chars, dots, or [msb:lsb] bit ranges
+        # - Format spec is optional :x/:X/:b/:d/:o at the end
+        placeholder_pattern = re.compile(r'\{((?:[^}:\[\]]+|\[\d+:\d+\])+)(?::([xXbdo]))?\}')
+
+        # Collect all signal references from log_format and their format specs
+        # Key: normalized signal name (last component without bit range)
+        # Value: (original_ref, needs_int_conversion)
+        signal_refs: Dict[str, Tuple[str, bool]] = {}
+
+        for match in placeholder_pattern.finditer(log_format):
+            signal_ref = match.group(1)
+            format_spec = match.group(2)
+
+            if signal_ref == "__time__":
+                continue
+
+            # Get the last component and normalize it
+            last_component = signal_ref.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+            needs_int = format_spec in ("x", "X", "b", "d", "o")
+
+            # If same signal appears with different format specs, prefer int conversion
+            if normalized in signal_refs:
+                _, existing_needs_int = signal_refs[normalized]
+                needs_int = needs_int or existing_needs_int
+
+            signal_refs[normalized] = (signal_ref, needs_int)
+
+        # Build context using normalized signal names
         for sig in capture_signals:
-            sig_name = sig.split(".")[-1].split("/")[-1]
+            last_component = sig.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+
             val_str = row_data["capd"].get(sig, "0")
+
+            # Handle undefined values
             if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
-                context[sig_name] = "0x0"
+                val_str = "0"
+
+            # Check if this signal needs int conversion
+            needs_int = signal_refs.get(normalized, (None, False))[1]
+
+            if needs_int:
+                # Parse hex string to integer
+                if val_str.startswith("0x") or val_str.startswith("0X"):
+                    context[normalized] = int(val_str, 16)
+                else:
+                    context[normalized] = int(val_str, 16) if val_str else 0
             else:
+                # Keep as string with 0x prefix for default display
                 if not val_str.startswith("0x") and not val_str.startswith("0X"):
                     val_str = "0x" + val_str
-                context[sig_name] = val_str
+                context[normalized] = val_str
+
+        # Replace signal references in log_format with normalized names
+        def replace_placeholder(match: re.Match) -> str:
+            signal_ref = match.group(1)
+            format_spec = match.group(2)
+
+            if signal_ref == "__time__":
+                return match.group(0)
+
+            last_component = signal_ref.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+
+            if format_spec:
+                return "{" + normalized + ":" + format_spec + "}"
+            else:
+                return "{" + normalized + "}"
+
+        safe_log_format = placeholder_pattern.sub(replace_placeholder, log_format)
 
         try:
-            return eval(f'f"""{log_format}"""', {}, context)
+            return eval(f'f"""{safe_log_format}"""', {}, context)
         except Exception as e:
             return f"[LOG ERROR] Failed to format log: {e}"
 
