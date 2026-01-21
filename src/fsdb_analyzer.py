@@ -54,6 +54,9 @@ class FsdbAnalyzer:
         # Only tracks duplicates within the same task
         self.matched_rows_tracker: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
 
+        # Global trace_id counter (shared across all trigger tasks)
+        self.next_trace_id: int = 0
+
     def _check_duplicate_match(
         self,
         time: int,
@@ -193,11 +196,11 @@ class FsdbAnalyzer:
 
         # Evaluate condition for each time point
         matched_rows = []
-        trace_id = 0  # Track number of matches
+        local_match_count = 0  # Track matches within this task (for debug_num limit)
 
         for row_idx in range(max_len):
             # Check debug_num limit (0 means unlimited)
-            if self.debug_num > 0 and trace_id >= self.debug_num:
+            if self.debug_num > 0 and local_match_count >= self.debug_num:
                 print(f"[DEBUG] Reached debug limit of {self.debug_num} trigger(s), stopping")
                 break
 
@@ -222,10 +225,13 @@ class FsdbAnalyzer:
                     # Expand capture templates with matched variables
                     signals = self._expand_templates(templates, vars, task.scope or "")
 
+                    # Use global trace_id counter
+                    current_trace_id = self.next_trace_id
+
                     # Build row_data with trace_id, fork_path, and dep_chain
                     row_data = {
                         "time": row_idx,
-                        "trace_id": trace_id,
+                        "trace_id": current_trace_id,
                         "fork_path": [],
                         "capd": {},
                         "dep_chain": {},  # Initialize dep_chain for trigger tasks
@@ -245,12 +251,14 @@ class FsdbAnalyzer:
                     matched_rows.append(row_data)
 
                     # Check for duplicate match
-                    self._check_duplicate_match(row_idx, task, trace_id, row_data["fork_path"])
+                    self._check_duplicate_match(row_idx, task, current_trace_id, row_data["fork_path"])
 
                     # Record trace lifecycle event (trigger starts a new trace)
-                    self._record_trace_event(trace_id, task, row_data, event_type="trigger")
+                    self._record_trace_event(current_trace_id, task, row_data, event_type="trigger")
 
-                    trace_id += 1  # Increment trace_id for each match
+                    # Increment global trace_id counter
+                    self.next_trace_id += 1
+                    local_match_count += 1
 
                     # Log if configured (but don't print immediately - save for trace lifecycle)
                     if task.logging:
@@ -258,8 +266,8 @@ class FsdbAnalyzer:
                             task.logging, row_data, signals, row_idx
                         )
                         # Store log message in trace event
-                        if trace_id - 1 in self.trace_lifecycle:
-                            self.trace_lifecycle[trace_id - 1][-1]["log_msg"] = log_msg
+                        if current_trace_id in self.trace_lifecycle:
+                            self.trace_lifecycle[current_trace_id][-1]["log_msg"] = log_msg
             except Exception as e:
                 print(f"[WARN] Error evaluating condition at row {row_idx}: {e}")
 
