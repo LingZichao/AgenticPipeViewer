@@ -97,13 +97,14 @@ class YamlBuilder:
     """YAML configuration loader and resolver"""
     config: Dict[str, Any]
 
+    _fsdb_builder: FsdbBuilder
+
     def __init__(self) -> None:
         self.output_dir: Optional[Path] = None
 
         self._validator = YamlValidator()
-        self._tasks_resolved: bool = False
-        self._fsdb_builder: Optional[FsdbBuilder] = None
         self._cond_builder = ConditionBuilder()
+        self._tasks_resolved: bool = False
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
@@ -265,13 +266,25 @@ class YamlBuilder:
 
                 # Collect condition signals from built Condition object
                 if task.condition:
-                    all_signals.update(task.condition.signals)
+                    for sig_obj in task.condition.signals:
+                        if sig_obj.is_pattern():
+                            # PatternSignal: use wildcard_pattern
+                            all_signals.add(sig_obj.wildcard_pattern)
+                        else:
+                            # Regular Signal: use raw_name
+                            all_signals.add(sig_obj.raw_name)
             else:
                 raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
 
         # Collect globalFlush condition signals from pre-built Condition object
         if gflush_condition:
-            all_signals.update(gflush_condition.signals)
+            for sig_obj in gflush_condition.signals:
+                if sig_obj.is_pattern():
+                    # PatternSignal: use wildcard_pattern
+                    all_signals.add(sig_obj.wildcard_pattern)
+                else:
+                    # Regular Signal: use raw_name
+                    all_signals.add(sig_obj.raw_name)
 
         return list(all_signals)
 
@@ -351,7 +364,6 @@ class YamlBuilder:
             return value.strip()
         elif isinstance(value, list):
             return " ".join(line.strip() for line in value if line.strip())
-        return str(value)
 
     def build_exec_order(self) -> List[int]:
         """Build topologically sorted task execution order and export dependency graph"""

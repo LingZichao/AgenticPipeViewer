@@ -166,9 +166,15 @@ class FsdbAnalyzer:
         }
 
         # Also need signals from condition (expand and load)
-        for cond_sig in cond.signals:
-            # Expand condition signal patterns
-            expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
+        for cond_sig_obj in cond.signals:
+            # Check if it's a PatternSignal or regular Signal
+            if cond_sig_obj.is_pattern():
+                # PatternSignal: expand wildcard pattern
+                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.wildcard_pattern])
+            else:
+                # Regular Signal: expand raw_name (may have bit range)
+                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.raw_name])
+            
             for sig in expanded:
                 normalized_sig = Signal.normalize(sig)
                 if normalized_sig in self.yaml_builder.fsdb_builder._signals:
@@ -307,9 +313,15 @@ class FsdbAnalyzer:
         }
 
         # Also need signals from condition (expand and load)
-        for cond_sig in cond.signals:
-            # Expand condition signal patterns
-            expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
+        for cond_sig_obj in cond.signals:
+            # Check if it's a PatternSignal or regular Signal
+            if cond_sig_obj.is_pattern():
+                # PatternSignal: expand wildcard pattern
+                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.wildcard_pattern])
+            else:
+                # Regular Signal: expand raw_name (may have bit range)
+                expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig_obj.raw_name])
+            
             for sig in expanded:
                 normalized_sig = Signal.normalize(sig)
                 if normalized_sig in self.yaml_builder.fsdb_builder._signals:

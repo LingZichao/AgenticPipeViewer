@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import re
 import ast
-from typing import Any, Callable, Dict, List, Optional, Tuple, Set
-from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set, Union
+from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup, Signal, PatternSignal
 
 
 class Condition:
@@ -18,7 +18,7 @@ class Condition:
         raw_expr: str,
         norm_expr: str,
         evaluator: Callable[[Dict[str, Any]], bool],
-        signals: List[str],
+        signals: List[Union[Signal, PatternSignal]],
         has_pattern: bool,
         pattern_var: str = ""
     ):
@@ -373,16 +373,16 @@ class ConditionParser:
 
     def __init__(self, scope: str):
         self.scope = scope
-        self.signals: Set[str] = set()
+        self.signal_objects: List[Union[Signal, PatternSignal]] = []  # Store Signal/PatternSignal objects
         self.has_pattern = False
         self.pattern_var = ""
-        self.pattern_signals: List[str] = []
+        self.pattern_signals: List[str] = []  # Store pattern template strings
 
-    def parse(self, expr: str) -> Tuple[str, List[str], bool, str]:
+    def parse(self, expr: str) -> Tuple[str, List[Union[Signal, PatternSignal]], bool, str]:
         """
         Parse and preprocess expression, collecting all metadata.
 
-        Returns: (normalized_expr, signals, has_pattern, pattern_var)
+        Returns: (normalized_expr, signal_objects, has_pattern, pattern_var)
         """
         # Normalize input: convert list to string
         if isinstance(expr, list):
@@ -399,7 +399,7 @@ class ConditionParser:
         # Step 3: Parse AST and collect signals
         self._collect_signals_from_ast(normalized)
 
-        return normalized, list(self.signals), self.has_pattern, self.pattern_var
+        return normalized, self.signal_objects, self.has_pattern, self.pattern_var
 
     def _extract_patterns(self, expr: str) -> None:
         """Extract and resolve pattern signals like signal{var}"""
@@ -421,11 +421,11 @@ class ConditionParser:
                     f"Multiple pattern variables not supported: {var_names}"
                 )
 
-            # Add pattern signals with {*} wildcard
+            # Create PatternSignal objects for pattern signals
             for pattern in patterns:
-                normalized_pattern = re.sub(r"\{[^}]+\}", "{*}", pattern)
-                resolved = resolve_signal_path(normalized_pattern, self.scope)
-                self.signals.add(resolved)
+                resolved_template = resolve_signal_path(pattern, self.scope)
+                pattern_sig = PatternSignal(template=resolved_template, scope=self.scope)
+                self.signal_objects.append(pattern_sig)
 
     def _normalize_syntax(self, expr: str) -> str:
         """Normalize custom syntax to Python-compatible AST"""
@@ -487,7 +487,11 @@ class ConditionParser:
         if name not in ["True", "False", "None"] and not name.startswith("_"):
             try:
                 resolved = resolve_signal_path(name, self.scope)
-                self.signals.add(resolved)
+                # Create Signal object
+                sig_obj = Signal(raw_name=resolved, scope=self.scope)
+                # Avoid duplicates by checking raw_name
+                if not any(s.raw_name == sig_obj.raw_name for s in self.signal_objects):
+                    self.signal_objects.append(sig_obj)
             except (ValueError, RuntimeError):
                 pass
 
@@ -497,7 +501,11 @@ class ConditionParser:
         if signal_name and not signal_name.startswith("_"):
             try:
                 resolved = resolve_signal_path(signal_name, self.scope)
-                self.signals.add(resolved)
+                # Create Signal object
+                sig_obj = Signal(raw_name=resolved, scope=self.scope)
+                # Avoid duplicates by checking raw_name
+                if not any(s.raw_name == sig_obj.raw_name for s in self.signal_objects):
+                    self.signal_objects.append(sig_obj)
             except (ValueError, RuntimeError):
                 pass
 
@@ -507,7 +515,11 @@ class ConditionParser:
         if signal_name and not signal_name.startswith("_"):
             try:
                 resolved = resolve_signal_path(signal_name, self.scope)
-                self.signals.add(resolved)
+                # Create Signal object
+                sig_obj = Signal(raw_name=resolved, scope=self.scope)
+                # Avoid duplicates by checking raw_name
+                if not any(s.raw_name == sig_obj.raw_name for s in self.signal_objects):
+                    self.signal_objects.append(sig_obj)
             except (ValueError, RuntimeError):
                 pass
 
