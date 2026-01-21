@@ -39,37 +39,16 @@ class Task:
         # Resolve capture signals to final form
         capture = yaml_builder.resolve_capture_signals(raw_capture, final_scope)
 
-        task_id = data.get("id")
-        if not task_id or not isinstance(task_id, str):
-            raise ValueError("[ERROR] Task 'id' field is required and must be a string")
-
-        # Validate match_mode
-        match_mode = data.get("matchMode", "all")
-        valid_modes = ("first", "all", "unique_per_var")
-        if match_mode not in valid_modes:
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' has invalid matchMode '{match_mode}'. "
-                f"Valid options: {', '.join(valid_modes)}"
-            )
-
-        # Validate max_match
-        max_match = data.get("maxMatch", 0)
-        if not isinstance(max_match, int) or max_match < 0:
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' has invalid maxMatch '{max_match}'. "
-                f"Must be a non-negative integer (0 = unlimited)"
-            )
-
         return cls(
-            id=task_id,
+            id=data.get("id"),
             raw_condition=raw_condition,
             capture=capture,
             name=data.get("name"),
             scope=final_scope,
             deps=data.get("dependsOn", []),
             logging=data.get("logging"),
-            match_mode=match_mode,
-            max_match=max_match,
+            match_mode=data.get("matchMode", "all"),
+            max_match=data.get("maxMatch", 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -360,6 +339,25 @@ class YamlBuilder:
                         raise ValueError(
                             f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
                         )
+
+        # Validate matchMode
+        if "matchMode" in task:
+            match_mode = task["matchMode"]
+            valid_modes = ("first", "all", "unique_per_var")
+            if match_mode not in valid_modes:
+                raise ValueError(
+                    f"[ERROR] Task '{task_identifier}' has invalid matchMode '{match_mode}'{line_info}. "
+                    f"Valid options: {', '.join(valid_modes)}"
+                )
+
+        # Validate maxMatch
+        if "maxMatch" in task:
+            max_match = task["maxMatch"]
+            if not isinstance(max_match, int) or max_match < 0:
+                raise ValueError(
+                    f"[ERROR] Task '{task_identifier}' has invalid maxMatch '{max_match}'{line_info}. "
+                    f"Must be a non-negative integer (0 = unlimited)"
+                )
 
     def _validate_deps(self, tasks: List[Dict[str, Any]]) -> None:
         """Validate task dependency graph and detect cycles"""
