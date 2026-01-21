@@ -159,6 +159,46 @@ class YamlBuilder:
         """Convenience property to access FsdbBuilder"""
         return self.get_fsdb_builder()
 
+    @property
+    def timestamps(self) -> List[int]:
+        """Get FSDB timestamps (in 100fs units)
+
+        Returns:
+            List of timestamps from FSDB
+
+        Raises:
+            RuntimeError: If called before signals are dumped
+        """
+        if not self._fsdb_builder or not self._fsdb_builder.timestamps:
+            raise RuntimeError(
+                "[ERROR] Timestamps not available. Call resolve_config() with dump_signals=True first."
+            )
+        return self._fsdb_builder.timestamps
+
+    @property
+    def fsdb_file(self) -> Path:
+        """Get FSDB file path
+
+        Returns:
+            Path to FSDB file
+
+        Raises:
+            RuntimeError: If called before load_config()
+        """
+        return self.get_fsdb_builder().fsdb_file
+
+    @property
+    def output_dir(self) -> Path:
+        """Get output directory path
+
+        Returns:
+            Path to output directory
+
+        Raises:
+            RuntimeError: If called before load_config()
+        """
+        return self.get_fsdb_builder().output_dir
+
     def resolve_config(
         self,
         dump_signals: bool = True

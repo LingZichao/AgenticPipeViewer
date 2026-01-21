@@ -313,9 +313,9 @@ class FsdbAnalyzer:
             print("[WARN] No signals loaded for condition evaluation")
             return []
 
-        # Get timeout from config and timestamps from FSDB
+        # Get timeout from config and timestamps from yaml_builder
         timeout = self.timeout
-        timestamps = self.yaml_builder.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.timestamps
 
         if not timestamps:
             print("[WARN] No timestamps available from FSDB")
@@ -798,7 +798,7 @@ class FsdbAnalyzer:
         """Compute all global flush boundary time points"""
         print("[INFO] Computing global flush boundaries...")
 
-        timestamps = self.yaml_builder.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.timestamps
 
         # Build signal_data from pre-resolved condition signals (same pattern as _trace_trigger/_trace_depends)
         signal_data: Dict[str, Signal] = {}
@@ -872,9 +872,9 @@ class FsdbAnalyzer:
         print(f"\n{'=' * 70}")
         print(f"[INFO] FSDB Analyzer - Collected {len(tasks)} task(s)")
         print(f"{'=' * 70}")
-        print(f"[INFO] FSDB file: {self.yaml_builder.fsdb_builder.fsdb_file}")
+        print(f"[INFO] FSDB file: {self.yaml_builder.fsdb_file}")
         print(f"[INFO] Clock signal: {self.clock_signal}")
-        print(f"[INFO] Output directory: {self.yaml_builder.fsdb_builder.output_dir}")
+        print(f"[INFO] Output directory: {self.yaml_builder.output_dir}")
         print(f"[INFO] Verbose mode: {'yes' if self.verbose else 'no'}")
         print(f"{'=' * 70}\n")
 
@@ -905,7 +905,7 @@ class FsdbAnalyzer:
         print()
 
         # Export trace lifecycle to file (no console output)
-        trace_report_file = self.yaml_builder.fsdb_builder.output_dir / "trace_lifecycle.txt"
+        trace_report_file = self.yaml_builder.output_dir / "trace_lifecycle.txt"
         self._export_trace_lifecycle(trace_report_file)
 
         # Print duplicate match summary to console
