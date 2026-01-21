@@ -25,9 +25,7 @@ class Task:
     max_match: int = 0  # Maximum matches per upstream trigger (0 = unlimited)
 
     @classmethod
-    def from_dict(
-        cls, data: Dict[str, Any], global_scope: str, yaml_builder: "YamlBuilder"
-    ) -> "Task":
+    def from_dict(cls, data: Dict[str, Any], global_scope: str) -> "Task":
         """Create Task from dictionary with all preprocessing"""
         task_scope = data.get("scope", "")
         # Calculate final scope: task scope overrides global scope
@@ -36,8 +34,8 @@ class Task:
         raw_capture = data.get("capture", [])
         raw_condition = data.get("condition", "")
 
-        # Resolve capture signals to final form
-        capture = yaml_builder.resolve_capture_signals(raw_capture, final_scope)
+        # Resolve capture signals with scope
+        capture = [resolve_signal_path(sig, final_scope) for sig in raw_capture]
 
         return cls(
             id=data.get("id"),
@@ -173,7 +171,7 @@ class YamlBuilder:
         global_scope = config.get("scope", "")
         task_objects: List[Task] = []
         for task_dict in config.get("tasks", []):
-            task_obj = Task.from_dict(task_dict, global_scope, self)
+            task_obj = Task.from_dict(task_dict, global_scope)
             task_objects.append(task_obj)
 
         config["tasks"] = task_objects
@@ -474,7 +472,6 @@ class YamlBuilder:
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
 
-        # Pure-Python NetworkX + Matplotlib implementation (no system 'dot' needed)
         self._export_deps_graph_matplotlib(output_path, task_execution_order)
 
     def _export_deps_graph_matplotlib(
@@ -691,28 +688,6 @@ class YamlBuilder:
             return eval(f'f"""{safe_log_format}"""', {}, context)
         except Exception as e:
             return f"[LOG ERROR] Failed to format log: {e}"
-
-    def resolve_capture_signals(
-        self, capture_signals: List[Any], scope: str
-    ) -> List[str]:
-        """Resolve capture signal paths with scope support
-
-        Args:
-            capture_signals: List of signal names to capture
-            scope: Resolved scope for this task
-
-        Returns:
-            List of resolved signal paths (patterns preserved)
-        """
-        resolved_signals: List[str] = []
-        for sig in capture_signals:
-            if isinstance(sig, str):
-                # Always resolve with scope, even if it contains {var} pattern
-                resolved_sig = resolve_signal_path(sig, scope)
-                resolved_signals.append(resolved_sig)
-            else:
-                resolved_signals.append(str(sig))
-        return resolved_signals
 
     def resolve_dep_references(
         self, value: Any, task_id: str, task_data: Dict[str, Any]
