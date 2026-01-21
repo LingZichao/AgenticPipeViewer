@@ -54,12 +54,11 @@ class Task:
     def to_dict(self) -> Dict[str, Any]:
         """Convert Task to dictionary"""
         result: Dict[str, Any] = {
+            "id": self.id,
             "capture": self.capture,
             "dependsOn": self.deps,
             "condition": self.raw_condition,
         }
-        if self.id:
-            result["id"] = self.id
         if self.name:
             result["name"] = self.name
         if self.scope:
@@ -152,12 +151,11 @@ class YamlBuilder:
 
         for idx, task in enumerate(config["tasks"], 1):
             self._validate_task(task, idx)
-            # Normalize condition to single string
+            # Normalize condition and logging to single string
             if "condition" in task:
-                task["condition"] = self._normalize_condition(task["condition"])
-            # Normalize logging to single string
+                task["condition"] = self._normalize(task["condition"])
             if "logging" in task:
-                task["logging"] = self._normalize_logging(task["logging"])
+                task["logging"] = self._normalize(task["logging"])
             # Normalize dependsOn to list
             if "dependsOn" in task:
                 depends = task["dependsOn"]
@@ -221,7 +219,7 @@ class YamlBuilder:
 
         # Collect globalFlush condition signals
         if "globalFlush" in self.config:
-            flush_condition = self._normalize_condition(self.config["globalFlush"]["condition"])
+            flush_condition = self._normalize(self.config["globalFlush"]["condition"])
             flush_signals = ConditionBuilder.collect_signals(
                 flush_condition,
                 self.config.get("scope", "")
@@ -230,25 +228,13 @@ class YamlBuilder:
 
         return list(all_signals)
 
-    def _resolve_signal_path(self, signal: str, scope: str) -> str:
-        """Resolve signal path with scope support (delegates to utils)"""
-        return resolve_signal_path(signal, scope)
-
-    def _normalize_condition(self, condition: Union[str, List[str]]) -> str:
-        """Normalize condition to single Python expression string"""
-        if isinstance(condition, str):
-            return condition.strip()
-        elif isinstance(condition, list):
-            return " ".join(line.strip() for line in condition if line.strip())
-        return str(condition)
-
-    def _normalize_logging(self, logging: Union[str, List[str]]) -> str:
-        """Normalize logging to single format string"""
-        if isinstance(logging, str):
-            return logging.strip()
-        elif isinstance(logging, list):
-            return " ".join(line.strip() for line in logging if line.strip())
-        return str(logging)
+    def _normalize(self, value: Union[str, List[str]]) -> str:
+        """Normalize string or list of strings to single space-joined string"""
+        if isinstance(value, str):
+            return value.strip()
+        elif isinstance(value, list):
+            return " ".join(line.strip() for line in value if line.strip())
+        return str(value)
 
     def _validate_task(self, task: Dict[str, Any], task_num: int) -> None:
         """Validate task configuration"""
@@ -722,7 +708,7 @@ class YamlBuilder:
         for sig in capture_signals:
             if isinstance(sig, str):
                 # Always resolve with scope, even if it contains {var} pattern
-                resolved_sig = self._resolve_signal_path(sig, scope)
+                resolved_sig = resolve_signal_path(sig, scope)
                 resolved_signals.append(resolved_sig)
             else:
                 resolved_signals.append(str(sig))
