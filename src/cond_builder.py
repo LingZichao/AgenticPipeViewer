@@ -34,11 +34,11 @@ class Condition:
         self.scope: str = ""  # Set by builder for pattern conditions
         self._pattern_signals: List[str] = []  # Pattern signal templates
 
-    def activate(self, pattern_resolver: Callable[[str], Tuple[List[str], List[str]]]) -> None:
-        """Activate pattern condition by expanding candidates and rebuilding evaluator
+    def activate(self, candidates: List[str]) -> None:
+        """Activate pattern condition by injecting resolved candidates
         
         Args:
-            pattern_resolver: Callback to resolve pattern (pattern -> (signals, candidates))
+            candidates: List of resolved candidate values for pattern variable
             
         Raises:
             RuntimeError: If called on non-pattern condition or already activated
@@ -49,13 +49,8 @@ class Condition:
         if self._activated:
             return  # Already activated
         
-        # Expand pattern candidates
-        possible_vals = set()
-        for pattern in self._pattern_signals:
-            _, candidates = pattern_resolver(pattern)
-            possible_vals.update(candidates)
-        
-        pattern_candidates = SignalGroup(values=list(possible_vals))
+        # Build SignalGroup from candidates
+        pattern_candidates = SignalGroup(values=candidates)
         
         # Rebuild evaluator with candidates
         from .cond_builder import ConditionBuilder
@@ -92,7 +87,7 @@ class Condition:
         if self.has_pattern and not self._activated:
             raise RuntimeError(
                 f"[ERROR] Pattern condition '{self.raw_expr}' not activated. "
-                "Call activate(pattern_resolver) before exec()."
+                "Call activate(candidates) before exec()."
             )
         
         try:
@@ -550,7 +545,7 @@ class ConditionBuilder:
             Condition object (pattern conditions need activate() before exec())
             
         Note:
-            For pattern conditions, call condition.activate(pattern_resolver)
+            For pattern conditions, call condition.activate(candidates)
             after FSDB signals are dumped.
         """
         # Parse and preprocess expression using unified parser

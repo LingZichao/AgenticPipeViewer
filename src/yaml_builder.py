@@ -207,18 +207,23 @@ class YamlBuilder:
             # Resolve capture templates to Signal objects (Stage 3)
             self.resolve_capture_signals()
             
-            # Define pattern resolver callback for activation
-            def pattern_resolver(pattern: str) -> Tuple[List[str], List[str]]:
-                return self._fsdb_builder.resolve_pattern(pattern, global_scope)
-            
-            # Activate all pattern conditions
+            # Activate pattern conditions with resolved candidates
             for task in task_objects:
                 if task.condition and task.condition.has_pattern:
-                    task.condition.activate(pattern_resolver)
+                    # Resolve all pattern signals and collect unique candidates
+                    candidates = set()
+                    for pattern in task.condition._pattern_signals:
+                        _, vals = self._fsdb_builder.resolve_pattern(pattern, global_scope)
+                        candidates.update(vals)
+                    task.condition.activate(list(candidates))
 
             # Activate globalFlush condition if it's a pattern condition
             if gflush_condition and gflush_condition.has_pattern:
-                gflush_condition.activate(pattern_resolver)
+                candidates = set()
+                for pattern in gflush_condition._pattern_signals:
+                    _, vals = self._fsdb_builder.resolve_pattern(pattern, global_scope)
+                    candidates.update(vals)
+                gflush_condition.activate(list(candidates))
 
         return config, gflush_condition
 
