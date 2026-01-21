@@ -143,26 +143,6 @@ class YamlBuilder:
 
         return config
 
-    def get_fsdb_builder(self) -> FsdbBuilder:
-        """Get the FsdbBuilder instance
-
-        Returns:
-            FsdbBuilder instance created during config loading
-
-        Raises:
-            RuntimeError: If called before load_config()
-        """
-        if self._fsdb_builder is None:
-            raise RuntimeError(
-                "[ERROR] FsdbBuilder not initialized. Call load_config() first."
-            )
-        return self._fsdb_builder
-
-    @property
-    def fsdb_builder(self) -> FsdbBuilder:
-        """Convenience property to access FsdbBuilder"""
-        return self.get_fsdb_builder()
-
     @property
     def timestamps(self) -> List[int]:
         """Get FSDB timestamps (in 100fs units)
@@ -189,19 +169,7 @@ class YamlBuilder:
         Raises:
             RuntimeError: If called before load_config()
         """
-        return self.get_fsdb_builder().fsdb_file
-
-    @property
-    def output_dir(self) -> Path:
-        """Get output directory path
-
-        Returns:
-            Path to output directory
-
-        Raises:
-            RuntimeError: If called before load_config()
-        """
-        return self.get_fsdb_builder().output_dir
+        return self._fsdb_builder.fsdb_file
 
     def resolve_config(
         self, dump_signals: bool = True
