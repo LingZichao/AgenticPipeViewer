@@ -3,7 +3,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from .yaml_builder import YamlBuilder, Task
-from .fsdb_builder import FsdbBuilder
 from .cond_builder import ConditionBuilder, Condition
 from .utils import resolve_signal_path, Signal
 
@@ -31,15 +30,11 @@ class FsdbAnalyzer:
         # Step 2: Extract config parameters
         self.verbose: bool = raw_config["output"]["verbose"]
         self.timeout: int  = raw_config["output"]["timeout"]
-        self.fsdb_file  = Path(raw_config["fsdbFile"])
-        self.output_dir = Path(raw_config["output"]["directory"])
         self.clock_signal: str = raw_config["globalClock"]
         self.global_scope: str = raw_config["scope"]
 
         # Step 3: Initialize ConditionBuilder before resolving config
         self.cond_builder = ConditionBuilder()
-
-        self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
 
         self.runtime_data: Dict[str, Any] = {}
 
@@ -175,7 +170,7 @@ class FsdbAnalyzer:
                 raw_signal_patterns.add(tmpl)
 
         # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_pattern(list(raw_signal_patterns))
+        all_signal_names = self.yaml_builder.fsdb_builder.expand_pattern(list(raw_signal_patterns))
 
         # Load all signals from FSDB cache (already dumped in run())
         # Note: Cache uses normalized names (without bit ranges)
@@ -183,8 +178,8 @@ class FsdbAnalyzer:
         for sig in all_signal_names:
             # Normalize signal name by removing bit range
             normalized_sig = Signal.normalize(sig)
-            if normalized_sig in self.fsdb_builder.signals:
-                signal_data[normalized_sig] = self.fsdb_builder.signals[normalized_sig]
+            if normalized_sig in self.yaml_builder.fsdb_builder.signals:
+                signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
             else:
                 print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
 
@@ -323,7 +318,7 @@ class FsdbAnalyzer:
                 raw_signal_patterns.add(tmpl)
 
         # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_pattern(list(raw_signal_patterns))
+        all_signal_names = self.yaml_builder.fsdb_builder.expand_pattern(list(raw_signal_patterns))
 
         # Load all signals
         # Note: Cache uses normalized names (without bit ranges)
@@ -331,8 +326,8 @@ class FsdbAnalyzer:
         for sig in all_signal_names:
             # Normalize signal name by removing bit range
             normalized_sig = Signal.normalize(sig)
-            if normalized_sig in self.fsdb_builder.signals:
-                signal_data[normalized_sig] = self.fsdb_builder.signals[normalized_sig]
+            if normalized_sig in self.yaml_builder.fsdb_builder.signals:
+                signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
             else:
                 print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
 
@@ -342,7 +337,7 @@ class FsdbAnalyzer:
 
         # Get timeout from config and timestamps from FSDB
         timeout = self.timeout
-        timestamps = self.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.fsdb_builder.timestamps
 
         if not timestamps:
             print("[WARN] No timestamps available from FSDB")
@@ -821,12 +816,12 @@ class FsdbAnalyzer:
         """Compute all global flush boundary time points"""
         print("[INFO] Computing global flush boundaries...")
 
-        timestamps = self.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.fsdb_builder.timestamps
 
         for row_idx in range(len(timestamps)):
             # Get signal values for this time point
             signal_values = {}
-            for norm_name, signal_obj in self.fsdb_builder.signals.items():
+            for norm_name, signal_obj in self.yaml_builder.fsdb_builder.signals.items():
                 signal_values[norm_name] = signal_obj.get_value(row_idx)
 
             runtime_data = {"signal_values": signal_values}
@@ -863,46 +858,20 @@ class FsdbAnalyzer:
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
-        self.config = self.yaml_builder.resolve_config()
+        # Resolve config (includes Task creation, condition building, SOI collection and signal dump)
+        self.config, self.gflush_condition = self.yaml_builder.resolve_config(
+            cond_builder=self.cond_builder,
+            dump_signals=not self.deps_only
+        )
 
         # Build execution order based on dependencies (always needed for graph export)
         tasks : List[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
 
-        # Define pattern resolver callback
-        def pattern_resolver(pattern: str) -> Tuple[List[str], List[str]]:
-            if self.fsdb_builder:
-                return self.fsdb_builder.resolve_pattern(pattern, self.global_scope)
-            else:
-                # In deps-only mode, provide a dummy expansion
-                resolved = resolve_signal_path(pattern, self.global_scope)
-                wildcard = re.sub(r'\{[^}]+\}', '{*}', resolved)
-                return [wildcard], []
-
-        # Build all conditions
-        for task in tasks:
-            if task.condition is None:
-                task.condition = self.cond_builder.build(task, pattern_resolver)
-
-        # Build globalFlush condition
-        if "globalFlush" in self.config:
-            flush_config = self.config["globalFlush"]
-            self.gflush_condition = self.cond_builder.build_raw(
-                raw_condition=flush_config["condition"],
-                scope=self.global_scope,
-                pattern_resolver=pattern_resolver
-            )
-
         # Early exit for deps-only mode after graph is generated
         if self.deps_only:
             print("[INFO] Dependency graph generated. Exiting deps-only mode without FSDB analysis.")
             return
-        if not self.fsdb_builder:
-            raise RuntimeError("[ERROR] FsdbBuilder not initialized in deps-only mode")
-
-        # Collect all signals-of-interest from all tasks
-        soi = self.yaml_builder.collect_raw_signals(self.global_scope)
-        self.fsdb_builder.dump_signals(soi)
 
         if self.gflush_condition:
             print("[INFO] Global flush condition compiled")
@@ -912,9 +881,9 @@ class FsdbAnalyzer:
         print(f"\n{'=' * 70}")
         print(f"[INFO] FSDB Analyzer - Collected {len(tasks)} task(s)")
         print(f"{'=' * 70}")
-        print(f"[INFO] FSDB file: {self.fsdb_file}")
+        print(f"[INFO] FSDB file: {self.yaml_builder.fsdb_builder.fsdb_file}")
         print(f"[INFO] Clock signal: {self.clock_signal}")
-        print(f"[INFO] Output directory: {self.output_dir}")
+        print(f"[INFO] Output directory: {self.yaml_builder.fsdb_builder.output_dir}")
         print(f"[INFO] Verbose mode: {'yes' if self.verbose else 'no'}")
         print(f"{'=' * 70}\n")
 
@@ -945,7 +914,7 @@ class FsdbAnalyzer:
         print()
 
         # Export trace lifecycle to file (no console output)
-        trace_report_file = self.output_dir / "trace_lifecycle.txt"
+        trace_report_file = self.yaml_builder.fsdb_builder.output_dir / "trace_lifecycle.txt"
         self._export_trace_lifecycle(trace_report_file)
 
         # Print duplicate match summary to console

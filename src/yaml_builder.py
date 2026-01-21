@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from .utils import resolve_signal_path
 from .cond_builder import Condition, ConditionBuilder
 from .yaml_validator import YamlValidator
+from .fsdb_builder import FsdbBuilder
 
 @dataclass
 class Task:
@@ -73,9 +74,10 @@ class YamlBuilder:
 
     def __init__(self) -> None:
         self.output_dir: Optional[Path] = None
-        
+
         self._validator = YamlValidator()
         self._tasks_resolved: bool = False
+        self._fsdb_builder: Optional[FsdbBuilder] = None
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
@@ -96,14 +98,59 @@ class YamlBuilder:
         self._validator.validate_config(config)
         self.output_dir = Path(config["output"]["directory"])
         self.config = config
+
+        # Extract FSDB parameters and create builder
+        fsdb_file = Path(config["fsdbFile"])
+        output_dir = Path(config["output"]["directory"])
+        verbose = config["output"]["verbose"]
+
+        # Create output directory if needed
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize FSDB builder
+        self._fsdb_builder = FsdbBuilder(fsdb_file, output_dir, verbose)
+
         return config
 
-    def resolve_config(self) -> Dict[str, Any]:
-        """Resolve config by converting dict tasks to Task objects"""
+    def get_fsdb_builder(self) -> FsdbBuilder:
+        """Get the FsdbBuilder instance
+
+        Returns:
+            FsdbBuilder instance created during config loading
+
+        Raises:
+            RuntimeError: If called before load_config()
+        """
+        if self._fsdb_builder is None:
+            raise RuntimeError(
+                "[ERROR] FsdbBuilder not initialized. Call load_config() first."
+            )
+        return self._fsdb_builder
+
+    @property
+    def fsdb_builder(self) -> FsdbBuilder:
+        """Convenience property to access FsdbBuilder"""
+        return self.get_fsdb_builder()
+
+    def resolve_config(
+        self,
+        cond_builder: Optional[ConditionBuilder] = None,
+        dump_signals: bool = True
+    ) -> Tuple[Dict[str, Any], Optional[Condition]]:
+        """Resolve config by converting dict tasks to Task objects and building conditions
+
+        Args:
+            cond_builder: ConditionBuilder instance for compiling conditions
+            dump_signals: If True, collect SOI and dump signals from FSDB (default: True)
+                         Set to False for deps-only mode
+
+        Returns:
+            Tuple of (resolved config dictionary, globalFlush condition if exists)
+        """
         config = self.config
+        global_scope = config.get("scope", "")
 
         # Convert dict tasks to Task objects
-        global_scope = config.get("scope", "")
         task_objects: List[Task] = []
         for task_dict in config.get("tasks", []):
             task_obj = Task.from_dict(task_dict, global_scope)
@@ -112,7 +159,41 @@ class YamlBuilder:
         config["tasks"] = task_objects
         self._tasks_resolved = True
 
-        return config
+        # Collect and dump signals if requested
+        if dump_signals and self._fsdb_builder:
+            soi = self.collect_raw_signals(global_scope)
+            self._fsdb_builder.dump_signals(soi)
+
+        # Build conditions if cond_builder provided
+        gflush_condition: Optional[Condition] = None
+        if cond_builder:
+            # Define pattern resolver callback
+            def pattern_resolver(pattern: str) -> Tuple[List[str], List[str]]:
+                if self._fsdb_builder:
+                    return self._fsdb_builder.resolve_pattern(pattern, global_scope)
+                else:
+                    # In deps-only mode, provide a dummy expansion
+                    from .utils import resolve_signal_path
+                    import re
+                    resolved = resolve_signal_path(pattern, global_scope)
+                    wildcard = re.sub(r'\{[^}]+\}', '{*}', resolved)
+                    return [wildcard], []
+
+            # Build all task conditions
+            for task in task_objects:
+                if task.condition is None:
+                    task.condition = cond_builder.build(task, pattern_resolver)
+
+            # Build globalFlush condition
+            if "globalFlush" in config:
+                flush_config = config["globalFlush"]
+                gflush_condition = cond_builder.build_raw(
+                    raw_condition=flush_config["condition"],
+                    scope=global_scope,
+                    pattern_resolver=pattern_resolver
+                )
+
+        return config, gflush_condition
 
     def collect_raw_signals(self, global_scope: str) -> List[str]:
         """Collect all raw signals-of-interest from all tasks (capture + condition)
