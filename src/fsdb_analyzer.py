@@ -171,8 +171,8 @@ class FsdbAnalyzer:
             expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
             for sig in expanded:
                 normalized_sig = Signal.normalize(sig)
-                if normalized_sig in self.yaml_builder.fsdb_builder.signals:
-                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
+                if normalized_sig in self.yaml_builder.fsdb_builder._signals:
+                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder._signals[normalized_sig]
                 else:
                     print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
 
@@ -312,8 +312,8 @@ class FsdbAnalyzer:
             expanded = self.yaml_builder.fsdb_builder.expand_pattern([cond_sig])
             for sig in expanded:
                 normalized_sig = Signal.normalize(sig)
-                if normalized_sig in self.yaml_builder.fsdb_builder.signals:
-                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder.signals[normalized_sig]
+                if normalized_sig in self.yaml_builder.fsdb_builder._signals:
+                    signal_data[normalized_sig] = self.yaml_builder.fsdb_builder._signals[normalized_sig]
                 else:
                     print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
 
@@ -811,7 +811,7 @@ class FsdbAnalyzer:
         for row_idx in range(len(timestamps)):
             # Get signal values for this time point
             signal_values = {}
-            for norm_name, signal_obj in self.yaml_builder.fsdb_builder.signals.items():
+            for norm_name, signal_obj in self.yaml_builder.fsdb_builder._signals.items():
                 signal_values[norm_name] = signal_obj.get_value(row_idx)
 
             runtime_data = {"signal_values": signal_values}
@@ -850,7 +850,6 @@ class FsdbAnalyzer:
 
         # Resolve config (includes Task creation, condition building, SOI collection and signal dump)
         self.config, self.gflush_condition = self.yaml_builder.resolve_config(
-            cond_builder=self.cond_builder,
             dump_signals=not self.deps_only
         )
 

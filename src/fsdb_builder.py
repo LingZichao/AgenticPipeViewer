@@ -17,8 +17,8 @@ class FsdbBuilder:
         self.output_dir: Path = output_dir
         self.verbose: bool    = verbose
 
-        self.signals: Dict[str, Signal] = {}  # Normalized name -> Signal object
         self.timestamps: List[int] = []  # FSDB timestamps in 100fs units
+        self._signals: Dict[str, Signal] = {}  # Normalized name -> Signal object
         self._signals_list: List[str] = [] # All signals name in FSDB
         self._signals_vidcode_map: Dict[str, int] = {}  # signal_name -> vidcode
 
@@ -66,9 +66,9 @@ class FsdbBuilder:
         return {sig: self._signals_vidcode_map.get(sig, -1) for sig in signals}
 
     def get_signal(self, signal: str) -> List[str]:
-        """Get single cached signal values"""
-        if signal in self.signals:
-            return self.signals[signal].values
+        """Get single cached Signal object by normalized name"""
+        if signal in self._signals:
+            return self._signals[signal]
         raise RuntimeError(f"Signal {signal} not found in cache. Call dump_signals first.")
 
     def expand_pattern(self, raw_signals: List[str]) -> List[str]:
@@ -129,7 +129,7 @@ class FsdbBuilder:
             return
 
         vidcode_map = self.get_signals_index()
-        self.signals = {}
+        self._signals = {}
         matched_signals = []
         missing_signals = []
 
@@ -137,7 +137,7 @@ class FsdbBuilder:
             # Expand pattern signals or resolve bit-ranges for direct signals
             for matched_name in self.expand_pattern([raw_sig]):
                 normalized = Signal.normalize(matched_name)
-                if normalized not in self.signals:
+                if normalized not in self._signals:
                     vidcode = vidcode_map.get(matched_name, -1)
                     if vidcode == -1:
                         missing_signals.append(matched_name)
@@ -147,7 +147,7 @@ class FsdbBuilder:
                     sig = Signal(raw_name=matched_name)
                     # Set additional attributes after creation
                     sig.vidcode = vidcode
-                    self.signals[normalized] = sig
+                    self._signals[normalized] = sig
                     matched_signals.append(normalized)
 
         if not matched_signals:
@@ -186,7 +186,7 @@ class FsdbBuilder:
 
         # Fill Signal objects with values at each timestamp (forward-fill)
         for normalized in matched_signals:
-            signal_obj = self.signals[normalized]
+            signal_obj = self._signals[normalized]
             vc_data = all_vc_data.get(normalized, {})
             signal_obj.set_waveform(self.timestamps, vc_data)
 
@@ -196,7 +196,7 @@ class FsdbBuilder:
 
     def _dump_single_signal(self, normalized: str):
         """Internal helper for parallel signal dumping"""
-        signal_obj = self.signals[normalized]
+        signal_obj = self._signals[normalized]
         cmd = ['fsdbdebug', '-vc', '-vidcode', str(signal_obj.vidcode), str(self.fsdb_file.absolute())]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               universal_newlines=True, timeout=120)
@@ -240,8 +240,8 @@ class FsdbBuilder:
                 for idx, time in enumerate(self.timestamps):
                     row = str(time).ljust(15)
                     for norm_name in signals:
-                        if norm_name in self.signals:
-                            row += self.signals[norm_name].get_value(idx)[:20].ljust(22)
+                        if norm_name in self._signals:
+                            row += self._signals[norm_name].get_value(idx)[:20].ljust(22)
                         else:
                             row += '0'.ljust(22)
                     f.write(row + '\n')

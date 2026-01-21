@@ -53,13 +53,13 @@ class Task:
                 # Create PatternSignal for pattern templates
                 capture_signals.append(PatternSignal(template=resolved_sig, scope=final_scope))
             else:
-                # Create regular Signal for non-pattern signals
+                # Create one regular Signal for non-pattern signals
                 capture_signals.append(Signal(raw_name=resolved_sig, scope=final_scope))
 
         return cls(
             id=data.get("id",""),
             raw_condition=raw_condition,
-            capture_signals=capture_signals,
+            capture=capture_signals,
             name=data.get("name"),
             scope=final_scope,
             deps=data.get("dependsOn", []),
@@ -103,6 +103,7 @@ class YamlBuilder:
         self._validator = YamlValidator()
         self._tasks_resolved: bool = False
         self._fsdb_builder: Optional[FsdbBuilder] = None
+        self._cond_builder = ConditionBuilder()
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
@@ -159,13 +160,11 @@ class YamlBuilder:
 
     def resolve_config(
         self,
-        cond_builder: Optional[ConditionBuilder] = None,
         dump_signals: bool = True
     ) -> Tuple[Dict[str, Any], Optional[Condition]]:
         """Resolve config by converting dict tasks to Task objects and building conditions
 
         Args:
-            cond_builder: ConditionBuilder instance for compiling conditions
             dump_signals: If True, collect SOI and dump signals from FSDB (default: True)
                          Set to False for deps-only mode
 
@@ -175,64 +174,72 @@ class YamlBuilder:
         config = self.config
         global_scope = config.get("scope", "")
 
-        # Convert dict tasks to Task objects
+        # Phase 1: Convert dict tasks to Task objects and build Conditions
+        # Pattern conditions are built but not activated yet (no FSDB dependency)
         task_objects: List[Task] = []
         for task_dict in config.get("tasks", []):
             task_obj = Task.from_dict(task_dict, global_scope)
+            # Build Condition immediately (pattern conditions need activation later)
+            task_obj.condition = self._cond_builder.build_raw(
+                task_obj.raw_condition,
+                task_obj.scope or global_scope
+            )
             task_objects.append(task_obj)
 
         config["tasks"] = task_objects
         self._tasks_resolved = True
+        
+        # Build globalFlush condition early (before dump_signals)
+        # This allows collect_raw_signals to use gflush_condition.signals
+        gflush_condition: Optional[Condition] = None
+        if "globalFlush" in config:
+            flush_config = config["globalFlush"]
+            gflush_condition = self._cond_builder.build_raw(
+                raw_condition=flush_config["condition"],
+                scope=global_scope
+            )
 
-        # Collect and dump signals if requested
+        # Phase 2: Dump signals and activate pattern conditions
         if dump_signals and self._fsdb_builder:
-            soi = self.collect_raw_signals(global_scope)
+            soi = self.collect_raw_signals(global_scope, gflush_condition)
             self._fsdb_builder.dump_signals(soi)
 
             # Resolve capture templates to Signal objects (Stage 3)
             self.resolve_capture_signals()
-
-        # Build conditions if cond_builder provided
-        gflush_condition: Optional[Condition] = None
-        if cond_builder:
-            # Define pattern resolver callback
+            
+            # Define pattern resolver callback for activation
             def pattern_resolver(pattern: str) -> Tuple[List[str], List[str]]:
-                if self._fsdb_builder:
-                    return self._fsdb_builder.resolve_pattern(pattern, global_scope)
-                else:
-                    # In deps-only mode, provide a dummy expansion
-                    from .utils import resolve_signal_path
-                    import re
-                    resolved = resolve_signal_path(pattern, global_scope)
-                    wildcard = re.sub(r'\{[^}]+\}', '{*}', resolved)
-                    return [wildcard], []
-
-            # Build all task conditions
+                return self._fsdb_builder.resolve_pattern(pattern, global_scope)
+            
+            # Activate all pattern conditions
             for task in task_objects:
-                if task.condition is None:
-                    task.condition = cond_builder.build(task, pattern_resolver)
+                if task.condition and task.condition.has_pattern:
+                    task.condition.activate(pattern_resolver)
 
-            # Build globalFlush condition
-            if "globalFlush" in config:
-                flush_config = config["globalFlush"]
-                gflush_condition = cond_builder.build_raw(
-                    raw_condition=flush_config["condition"],
-                    scope=global_scope,
-                    pattern_resolver=pattern_resolver
-                )
+            # Activate globalFlush condition if it's a pattern condition
+            if gflush_condition and gflush_condition.has_pattern:
+                gflush_condition.activate(pattern_resolver)
 
         return config, gflush_condition
 
-    def collect_raw_signals(self, global_scope: str) -> List[str]:
+    def collect_raw_signals(
+        self, 
+        global_scope: str,
+        gflush_condition: Optional[Condition] = None
+    ) -> List[str]:
         """Collect all raw signals-of-interest from all tasks (capture + condition)
 
         Signals may contain wildcard patterns like {*} which will be expanded by fsdb_builder.
 
         Args:
             global_scope: Global scope for signal resolution
+            gflush_condition: Pre-built globalFlush Condition object (optional)
 
         Returns:
             List of all raw signals (may contain {*} patterns)
+            
+        Note:
+            Must be called after Task.condition is built (after resolve_config Phase 1)
         """
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
@@ -251,23 +258,15 @@ class YamlBuilder:
                         # Regular Signal: use raw_name
                         all_signals.add(sig.raw_name)
 
-                # Collect condition signals using ConditionBuilder
-                if task.raw_condition:
-                    condition_str = task.raw_condition.replace("&&", " and ").replace("||", " or ")
-                    condition_str = re.sub(r'\s+', ' ', condition_str).strip()
-                    cond_signals = ConditionBuilder.collect_signals(condition_str, task.scope or "")
-                    all_signals.update(cond_signals)
+                # Collect condition signals from built Condition object
+                if task.condition:
+                    all_signals.update(task.condition.signals)
             else:
                 raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
 
-        # Collect globalFlush condition signals
-        if "globalFlush" in self.config:
-            flush_condition = self._normalize(self.config["globalFlush"]["condition"])
-            flush_signals = ConditionBuilder.collect_signals(
-                flush_condition,
-                self.config.get("scope", "")
-            )
-            all_signals.update(flush_signals)
+        # Collect globalFlush condition signals from pre-built Condition object
+        if gflush_condition:
+            all_signals.update(gflush_condition.signals)
 
         return list(all_signals)
 
@@ -282,7 +281,7 @@ class YamlBuilder:
         Raises:
             RuntimeError: If called before FSDB signals are dumped
         """
-        if not self._fsdb_builder or not self._fsdb_builder.signals:
+        if not self._fsdb_builder or not self._fsdb_builder._signals:
             raise RuntimeError("Cannot resolve capture signals before FSDB dump")
 
         tasks: List[Task] = self.config.get("tasks", [])
@@ -320,8 +319,8 @@ class YamlBuilder:
                             
                             # Look up Signal object from cache
                             normalized = Signal.normalize(sig_name)
-                            if normalized in self._fsdb_builder.signals:
-                                resolved_signals.append(self._fsdb_builder.signals[normalized])
+                            if normalized in self._fsdb_builder._signals:
+                                resolved_signals.append(self._fsdb_builder._signals[normalized])
                     
                     # Populate PatternSignal with candidates and resolved signals
                     pattern_sig.set_candidates(
@@ -331,8 +330,8 @@ class YamlBuilder:
                 else:
                     # Regular Signal: populate waveform data from FSDB cache
                     normalized = Signal.normalize(sig.raw_name)
-                    if normalized in self._fsdb_builder.signals:
-                        cached_sig = self._fsdb_builder.signals[normalized]
+                    if normalized in self._fsdb_builder._signals:
+                        cached_sig = self._fsdb_builder._signals[normalized]
                         # Copy waveform data to task's Signal object
                         sig.vidcode = cached_sig.vidcode
                         sig.values = cached_sig.values

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 import re
 import ast
-from typing import Any, Callable, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup
-
-if TYPE_CHECKING:
-    from .yaml_builder import Task
 
 
 class Condition:
-    """Compiled condition that can be executed with runtime data"""
+    """Compiled condition that can be executed with runtime data
+    
+    Supports two-phase initialization for pattern conditions:
+    1. Build phase: Parse structure without expanding patterns
+    2. Activate phase: Expand pattern candidates and rebuild evaluator
+    """
 
     def __init__(
         self,
@@ -26,6 +28,48 @@ class Condition:
         self.signals = signals
         self.has_pattern = has_pattern
         self.pattern_var = pattern_var
+        
+        # Two-phase initialization support
+        self._activated = not has_pattern  # Non-pattern conditions are always activated
+        self.scope: str = ""  # Set by builder for pattern conditions
+        self._pattern_signals: List[str] = []  # Pattern signal templates
+
+    def activate(self, pattern_resolver: Callable[[str], Tuple[List[str], List[str]]]) -> None:
+        """Activate pattern condition by expanding candidates and rebuilding evaluator
+        
+        Args:
+            pattern_resolver: Callback to resolve pattern (pattern -> (signals, candidates))
+            
+        Raises:
+            RuntimeError: If called on non-pattern condition or already activated
+        """
+        if not self.has_pattern:
+            return  # Non-pattern conditions don't need activation
+        
+        if self._activated:
+            return  # Already activated
+        
+        # Expand pattern candidates
+        possible_vals = set()
+        for pattern in self._pattern_signals:
+            _, candidates = pattern_resolver(pattern)
+            possible_vals.update(candidates)
+        
+        pattern_candidates = SignalGroup(values=list(possible_vals))
+        
+        # Rebuild evaluator with candidates
+        from .cond_builder import ConditionBuilder
+        builder = ConditionBuilder()
+        self.evaluator = builder._build_evaluator(
+            self.scope,
+            self.raw_expr,
+            self.has_pattern,
+            self.pattern_var,
+            self._pattern_signals,
+            pattern_candidates
+        )
+        
+        self._activated = True
 
     def exec(self, runtime_data: Dict[str, Any]) -> bool:
         """Execute this condition with runtime data
@@ -43,7 +87,14 @@ class Condition:
 
         Raises:
             ValueError: If evaluation fails with detailed error context
+            RuntimeError: If pattern condition not activated before exec
         """
+        if self.has_pattern and not self._activated:
+            raise RuntimeError(
+                f"[ERROR] Pattern condition '{self.raw_expr}' not activated. "
+                "Call activate(pattern_resolver) before exec()."
+            )
+        
         try:
             return self.evaluator(runtime_data)
         except Exception as e:
@@ -484,31 +535,23 @@ class ConditionParser:
 class ConditionBuilder:
     """Build and execute conditions with runtime data"""
 
-    @staticmethod
-    def collect_signals(condition_str: str, scope: str) -> List[str]:
-        """Extract signal identifiers from condition expression (static method)"""
-        parser = ConditionParser(scope)
-        _, signals, _, _ = parser.parse(condition_str)
-        return signals
-
-    def build(self, task: "Task", pattern_resolver: Optional[Callable] = None) -> Condition:
-        """Build a condition from task"""
-        scope = task.scope or ""
-        raw_expr = task.raw_condition
-        return self.build_raw(raw_expr, scope, pattern_resolver)
-
     def build_raw(
         self,
         raw_condition: str,
-        scope: str,
-        pattern_resolver: Optional[Callable] = None
+        scope: str
     ) -> Condition:
-        """Build condition from raw expression
+        """Build condition from raw expression (two-phase initialization)
         
         Args:
             raw_condition: Raw condition expression string
             scope: Signal scope for resolution
-            pattern_resolver: Callback to resolve signal patterns (pattern -> (signals, candidates))
+            
+        Returns:
+            Condition object (pattern conditions need activate() before exec())
+            
+        Note:
+            For pattern conditions, call condition.activate(pattern_resolver)
+            after FSDB signals are dumped.
         """
         # Parse and preprocess expression using unified parser
         parser = ConditionParser(scope)
@@ -520,36 +563,44 @@ class ConditionBuilder:
         else:
             raw_condition_str = str(raw_condition)
 
-        # Pre-compute pattern candidates if needed
-        pattern_candidates = None
-        if has_pattern and pattern_resolver:
-            possible_vals = set()
-
-            for pattern in parser.pattern_signals:
-                # pattern_resolver handles scope resolution and expansion internally
-                _, candidates = pattern_resolver(pattern)
-                possible_vals.update(candidates)
+        if has_pattern:
+            # Pattern condition: Create placeholder evaluator for later activation
+            def placeholder_evaluator(runtime_data: Dict[str, Any]) -> bool:
+                raise RuntimeError(
+                    f"Pattern condition '{raw_condition_str}' not activated. "
+                    "Call activate(pattern_resolver) before exec()."
+                )
             
-            pattern_candidates = SignalGroup(values=list(possible_vals))
-
-        # Build unified evaluator
-        evaluator = self._build_evaluator(
-            scope,
-            raw_condition_str,
-            has_pattern,
-            pattern_var,
-            parser.pattern_signals if has_pattern else None,
-            pattern_candidates,
-        )
-
-        return Condition(
-            raw_condition_str,
-            norm_expr,
-            evaluator,
-            signals,
-            has_pattern,
-            pattern_var,
-        )
+            condition = Condition(
+                raw_condition_str,
+                norm_expr,
+                placeholder_evaluator,
+                signals,
+                has_pattern=True,
+                pattern_var=pattern_var
+            )
+            # Store metadata for later activation
+            condition.scope = scope
+            condition._pattern_signals = parser.pattern_signals
+            return condition
+        else:
+            # Non-pattern condition: Build complete evaluator immediately
+            evaluator = self._build_evaluator(
+                scope,
+                raw_condition_str,
+                has_pattern=False,
+                pattern_var="",
+                patterns=None,
+                candidates=None
+            )
+            return Condition(
+                raw_condition_str,
+                norm_expr,
+                evaluator,
+                signals,
+                has_pattern=False,
+                pattern_var=""
+            )
 
     def _build_evaluator(
         self,
