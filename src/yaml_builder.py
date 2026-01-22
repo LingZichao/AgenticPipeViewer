@@ -221,24 +221,21 @@ class YamlBuilder:
             # Resolve condition signals to Signal objects (Stage 3)
             self.resolve_condition_signals(gflush_condition)
 
-            # Activate pattern conditions with resolved candidates
+            # Activate pattern conditions with candidates resolved in Stage 3
             for task in task_objects:
                 if task.condition and task.condition.has_pattern:
-                    # Resolve all pattern signals and collect unique candidates
                     candidates = set()
-                    for pattern in task.condition._pattern_signals:
-                        _, vals = self._fsdb_builder.resolve_pattern(
-                            pattern, global_scope
-                        )
-                        candidates.update(vals)
+                    for sig in task.condition.signals:
+                        if sig.is_pattern():
+                            candidates.update(sig.candidates)
                     task.condition.activate(list(candidates))
 
             # Activate globalFlush condition if it's a pattern condition
             if gflush_condition and gflush_condition.has_pattern:
                 candidates = set()
-                for pattern in gflush_condition._pattern_signals:
-                    _, vals = self._fsdb_builder.resolve_pattern(pattern, global_scope)
-                    candidates.update(vals)
+                for sig in gflush_condition.signals:
+                    if sig.is_pattern():
+                        candidates.update(sig.candidates)
                 gflush_condition.activate(list(candidates))
 
         return config, gflush_condition
@@ -304,103 +301,23 @@ class YamlBuilder:
         return list(all_signals)
 
     def resolve_capture_signals(self) -> None:
-        """Resolve capture Signal objects and populate with FSDB waveform data
-
-        After FSDB dump, this method:
-        - Expands PatternSignal wildcard patterns to find matching signals
-        - Populates PatternSignal.candidates and PatternSignal.resolved_signals
-        - Populates regular Signal objects with waveform data from FSDB cache
-        - Updates task.capture and task.signal_map with fully resolved Signal objects
-
-        Raises:
-            RuntimeError: If called before FSDB signals are dumped
-        """
+        """Resolve capture Signal objects and populate with FSDB waveform data"""
         if not self._fsdb_builder or not self._fsdb_builder._signals:
             raise RuntimeError("Cannot resolve capture signals before FSDB dump")
 
         tasks: List[Task] = self.config.get("tasks", [])
 
         for task in tasks:
-            resolved_capture: List[Signal] = []
-            for sig in task.capture:
-                if sig.is_pattern():
-                    # PatternSignal: expand and link to Signal objects
-                    pattern_sig = sig  # Type hint: this is a PatternSignal
-
-                    # Expand wildcard pattern to actual signal names
-                    expanded_names = self._fsdb_builder.expand_pattern(
-                        [pattern_sig.wildcard_pattern]
-                    )
-
-                    # Extract candidate values (pattern variable values)
-                    candidates = set()
-                    resolved_signals = []
-
-                    for sig_name in expanded_names:
-                        # Extract variable value from expanded name
-                        template = pattern_sig.template
-                        var_name = pattern_sig.variable_name
-
-                        # Create regex pattern from template
-                        regex_pattern = re.escape(template).replace(
-                            re.escape(f"{{{var_name}}}"), r"(\w+)"
-                        )
-
-                        match = re.match(regex_pattern, sig_name)
-                        if match:
-                            candidate_value = match.group(1)
-                            candidates.add(candidate_value)
-
-                            # Look up Signal object from cache
-                            normalized = Signal.normalize(sig_name)
-                            if normalized in self._fsdb_builder._signals:
-                                cached_sig = self._fsdb_builder._signals[normalized]
-                                resolved_signals.append(cached_sig)
-                                if cached_sig not in resolved_capture:
-                                    resolved_capture.append(cached_sig)
-
-                    # Populate PatternSignal with candidates and resolved signals
-                    pattern_sig.set_candidates(
-                        candidate_values=list(candidates),
-                        signal_objects=resolved_signals,
-                    )
-                else:
-                    # Regular Signal: populate waveform data from FSDB cache
-                    normalized = Signal.normalize(sig.raw_name)
-                    if normalized in self._fsdb_builder._signals:
-                        cached_sig = self._fsdb_builder._signals[normalized]
-                        # Copy waveform data to task's Signal object
-                        sig.vidcode = cached_sig.vidcode
-                        sig.values = cached_sig.values
-                        sig.msb = cached_sig.msb
-                        sig.lsb = cached_sig.lsb
-                        resolved_capture.append(sig)
-                    else:
-                        print(
-                            f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'"
-                        )
-            
+            resolved_capture = self._resolve_signal_list(
+                task.capture, context_info=f"task '{task.id}'"
+            )
             # Update task signal_map with all resolved Signal objects
-            # Note: We keep task.capture as the original list (Signal/PatternSignal)
-            # to support runtime resolution via sig.resolve(vars)
             task.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_capture}
 
     def resolve_condition_signals(
         self, gflush_condition: Optional[Condition] = None
     ) -> None:
-        """Resolve condition Signal objects and populate with FSDB waveform data
-
-        After FSDB dump, this method:
-        - Expands PatternSignal wildcard patterns in conditions to actual signal names
-        - Creates Signal objects for expanded signals and populates with waveform data
-        - Replaces Condition.signals list with fully resolved Signal objects
-
-        Args:
-            gflush_condition: Optional globalFlush Condition to also resolve
-
-        Raises:
-            RuntimeError: If called before FSDB signals are dumped
-        """
+        """Resolve condition Signal objects and populate with FSDB waveform data"""
         if not self._fsdb_builder or not self._fsdb_builder._signals:
             raise RuntimeError("Cannot resolve condition signals before FSDB dump")
 
@@ -409,59 +326,86 @@ class YamlBuilder:
         # Resolve condition signals for all tasks
         for task in tasks:
             if task.condition:
-                self._resolve_condition_for_object(task.condition)
+                resolved_signals = self._resolve_signal_list(
+                    task.condition.signals, context_info=f"task '{task.id}' condition"
+                )
+                task.condition.signal_map = {
+                    Signal.normalize(s.raw_name): s for s in resolved_signals
+                }
 
         # Resolve globalFlush condition if provided
         if gflush_condition:
-            self._resolve_condition_for_object(gflush_condition)
+            resolved_signals = self._resolve_signal_list(
+                gflush_condition.signals, context_info="globalFlush condition"
+            )
+            gflush_condition.signal_map = {
+                Signal.normalize(s.raw_name): s for s in resolved_signals
+            }
 
-    def _resolve_condition_for_object(self, cond: Condition) -> None:
-        """Helper method to resolve signals for a single Condition object
+    def _resolve_signal_list(
+        self, signals: List[Union[Signal, PatternSignal]], context_info: str = ""
+    ) -> List[Signal]:
+        """Unified logic to resolve Signal and PatternSignal objects from FSDB cache.
 
-        Expands patterns and populates Signal objects with waveform data from FSDB cache.
-        Replaces cond.signals list with fully resolved Signal objects.
-
-        Args:
-            cond: Condition object to resolve
+        Populates waveform data for Signal objects and candidates for PatternSignal objects.
+        Returns a flat list of all resolved Signal objects (including expanded pattern signals).
         """
-        resolved_signals: List[Signal] = []
-
-        for sig_obj in cond.signals:
-            if sig_obj.is_pattern():
-                # PatternSignal: expand wildcard pattern to actual signal names
+        resolved_list: List[Signal] = []
+        for sig in signals:
+            if sig.is_pattern():
+                # PatternSignal handling
+                pattern_sig = sig
                 expanded_names = self._fsdb_builder.expand_pattern(
-                    [sig_obj.wildcard_pattern]
+                    [pattern_sig.wildcard_pattern]
                 )
 
+                candidates = set()
+                pattern_resolved_signals = []
+
                 for sig_name in expanded_names:
-                    normalized = Signal.normalize(sig_name)
-                    if normalized in self._fsdb_builder._signals:
-                        # Use cached Signal object with waveform data
-                        resolved_signals.append(self._fsdb_builder._signals[normalized])
-                    else:
-                        print(
-                            f"[WARN] Signal '{normalized}' not found in FSDB cache for condition"
-                        )
-            else:
-                # Regular Signal: populate waveform data from FSDB cache
-                normalized = Signal.normalize(sig_obj.raw_name)
-                if normalized in self._fsdb_builder._signals:
-                    cached_sig = self._fsdb_builder._signals[normalized]
-                    # Copy waveform data to condition's Signal object
-                    sig_obj.vidcode = cached_sig.vidcode
-                    sig_obj.values = cached_sig.values
-                    sig_obj.msb = cached_sig.msb
-                    sig_obj.lsb = cached_sig.lsb
-                    resolved_signals.append(sig_obj)
-                else:
-                    print(
-                        f"[WARN] Signal '{normalized}' not found in FSDB cache for condition"
+                    # Extract variable value from expanded name
+                    template = pattern_sig.template
+                    var_name = pattern_sig.variable_name
+
+                    # Create regex pattern from template
+                    regex_pattern = re.escape(template).replace(
+                        re.escape(f"{{{var_name}}}"), r"(\w+)"
                     )
 
-        # Update cond.signal_map with resolved Signal objects
-        # Note: We keep cond.signals as the original list (Signal/PatternSignal)
-        # to support runtime resolution if needed
-        cond.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_signals}
+                    match = re.match(regex_pattern, sig_name)
+                    if match:
+                        candidates.add(match.group(1))
+
+                        # Look up Signal object from cache
+                        normalized = Signal.normalize(sig_name)
+                        if normalized in self._fsdb_builder._signals:
+                            cached_sig = self._fsdb_builder._signals[normalized]
+                            pattern_resolved_signals.append(cached_sig)
+                            if cached_sig not in resolved_list:
+                                resolved_list.append(cached_sig)
+
+                # Populate PatternSignal with candidates and resolved signals
+                pattern_sig.set_candidates(
+                    candidate_values=list(candidates),
+                    signal_objects=pattern_resolved_signals,
+                )
+            else:
+                # Regular Signal handling
+                normalized = Signal.normalize(sig.raw_name)
+                if normalized in self._fsdb_builder._signals:
+                    cached_sig = self._fsdb_builder._signals[normalized]
+                    # Populate waveform data into the existing Signal object
+                    sig.vidcode = cached_sig.vidcode
+                    sig.values = cached_sig.values
+                    sig.msb = cached_sig.msb
+                    sig.lsb = cached_sig.lsb
+                    resolved_list.append(sig)
+                else:
+                    print(
+                        f"[WARN] Signal '{normalized}' not found in FSDB cache for {context_info}"
+                    )
+        return resolved_list
+
 
     def _normalize(self, value: Union[str, List[str]]) -> str:
         """Normalize string or list of strings to single space-joined string"""
