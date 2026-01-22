@@ -283,7 +283,7 @@ Pattern conditions pre-compute candidate values for efficiency.
 Uses Python `ast` module for safe expression evaluation:
 - Parse condition string → AST
 - Walk AST, evaluate nodes with custom visitor
-- Resolve signal names → values from `runtime_data["signal_values"]`
+- Resolve signal names → values from `Condition.signal_map` using current `time`
 
 This avoids unsafe `eval()` while supporting complex expressions.
 
@@ -291,7 +291,7 @@ This avoids unsafe `eval()` while supporting complex expressions.
 
 ```python
 runtime_data = {
-    "signal_values": {signal_name: hex_value},  # Current time slice
+    "time": int,  # Current time index
     "upstream_row": {time: int, capd: {signal: value}},  # For $dep refs
     "upstream_data": {capd: [signal_list]},  # Available upstream signals
     "vars": {var_name: matched_value},  # Pattern variable bindings

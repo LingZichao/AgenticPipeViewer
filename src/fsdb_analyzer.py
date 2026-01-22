@@ -156,26 +156,12 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
-        # Only include actual Signal objects, exclude PatternSignal objects
-        signal_data: Dict[str, Signal] = {
-            Signal.normalize(sig.raw_name): sig
-            for sig in task.capture
-            if not sig.is_pattern()
-        }
-
-        # Use pre-resolved condition signals from Condition.signals (Stage 3 optimization)
-        # All PatternSignal objects have been expanded to Signal objects in yaml_builder
-        if cond:
-            for sig_obj in cond.signals:
-                normalized_sig = Signal.normalize(sig_obj.raw_name)
-                signal_data[normalized_sig] = sig_obj
-
-        if not signal_data:
+        if not cond.signal_map:
             print("[WARN] No signals loaded for evaluation")
             return []
 
-        max_len = max(len(signal_obj.values) for signal_obj in signal_data.values())
+        # Find max_len across all signals in cond.signals
+        max_len = max(len(signal_obj.values) for signal_obj in cond.signals)
 
         # Evaluate condition for each time point
         matched_rows = []
@@ -188,14 +174,8 @@ class FsdbAnalyzer:
                 break
 
             try:
-                # Build signal_values for this time point
-                signal_values = {}
-                for sig, signal_obj in signal_data.items():
-                    signal_values[sig] = signal_obj.get_value(row_idx)
-
                 runtime_data = {
-                    "signal_values": signal_values,
-                    "signal_metadata": signal_data,
+                    "time": row_idx,
                     "upstream_row": {},
                     "upstream_data": {},
                     "vars": {},
@@ -222,8 +202,8 @@ class FsdbAnalyzer:
                     for sig in signals:
                         # Normalize signal name to match cache keys
                         normalized_sig = Signal.normalize(sig)
-                        if normalized_sig in signal_data:
-                            signal_obj = signal_data[normalized_sig]
+                        if normalized_sig in task.signal_map:
+                            signal_obj = task.signal_map[normalized_sig]
                             # Use original signal name (with scope) as key in capd
                             row_data["capd"][sig] = signal_obj.get_value(row_idx)
                         # Signal not found in signal_data - skip silently
@@ -293,22 +273,7 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Use pre-resolved Signal objects from task.capture_signals (Stage 3 optimization)
-        # Only include actual Signal objects, exclude PatternSignal objects
-        signal_data: Dict[str, Signal] = {
-            Signal.normalize(sig.raw_name): sig
-            for sig in task.capture
-            if not sig.is_pattern()
-        }
-
-        # Use pre-resolved condition signals from Condition.signals (Stage 3 optimization)
-        # All PatternSignal objects have been expanded to Signal objects in yaml_builder
-        if cond:
-            for sig_obj in cond.signals:
-                normalized_sig = Signal.normalize(sig_obj.raw_name)
-                signal_data[normalized_sig] = sig_obj
-
-        if not signal_data:
+        if not cond.signal_map:
             print("[WARN] No signals loaded for condition evaluation")
             return []
 
@@ -366,14 +331,8 @@ class FsdbAnalyzer:
                     break
 
                 try:
-                    # Prepare signal values for this row
-                    signal_values = {}
-                    for sig, signal_obj in signal_data.items():
-                        signal_values[sig] = signal_obj.get_value(row_idx)
-
                     runtime_data = {
-                        "signal_values": signal_values,
-                        "signal_metadata": signal_data,
+                        "time": row_idx,
                         "upstream_row": upstream_row,
                         "upstream_data": upstream_data,
                         "vars": {},
@@ -404,7 +363,7 @@ class FsdbAnalyzer:
                                 # Original behavior: capture first match, break
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, templates, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -436,7 +395,7 @@ class FsdbAnalyzer:
 
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, templates, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -462,7 +421,7 @@ class FsdbAnalyzer:
                                 # Capture ALL matches in time window
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, templates, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -506,7 +465,6 @@ class FsdbAnalyzer:
         upstream_fork_path: List[int],
         vars: Dict[str, str],
         templates: List[str],
-        signal_data: Dict[str, Signal],
         task: Task,
         upstream_row: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -519,7 +477,6 @@ class FsdbAnalyzer:
             upstream_fork_path: Fork path from upstream row
             vars: Matched pattern variables
             templates: Capture signal templates
-            signal_data: Signal cache data
             task: Task configuration
             upstream_row: Upstream row data (for dependency chain propagation)
 
@@ -543,8 +500,8 @@ class FsdbAnalyzer:
         for sig in signals:
             # Normalize signal name to match cache keys
             normalized_sig = Signal.normalize(sig)
-            if normalized_sig in signal_data:
-                signal_obj = signal_data[normalized_sig]
+            if normalized_sig in task.signal_map:
+                signal_obj = task.signal_map[normalized_sig]
                 # Use original signal name (with scope) as key in capd
                 row_data["capd"][sig] = signal_obj.get_value(row_idx)
 
@@ -799,23 +756,14 @@ class FsdbAnalyzer:
 
         timestamps = self.yaml_builder.timestamps
 
-        # Build signal_data from pre-resolved condition signals (same pattern as _trace_trigger/_trace_depends)
-        signal_data: Dict[str, Signal] = {}
-        for sig_obj in self.gflush_condition.signals:
-            normalized_sig = Signal.normalize(sig_obj.raw_name)
-            signal_data[normalized_sig] = sig_obj
-
-        if not signal_data:
+        if not self.gflush_condition.signal_map:
             print("[WARN] No signals loaded for globalFlush condition")
             return
 
         for row_idx in range(len(timestamps)):
-            # Build signal values for this time point
-            signal_values = {}
-            for sig, signal_obj in signal_data.items():
-                signal_values[sig] = signal_obj.get_value(row_idx)
-
-            runtime_data = {"signal_values": signal_values}
+            runtime_data = {
+                "time": row_idx,
+            }
 
             # Check if flush condition is satisfied
             if self.gflush_condition.exec(runtime_data):
@@ -825,9 +773,9 @@ class FsdbAnalyzer:
                 if self.verbose:
                     # Output which signals triggered flush
                     flush_signals = [
-                        f"{sig}={val}"
-                        for sig, val in signal_values.items()
-                        if val not in ("0", "*0")
+                        f"{sig_name}={sig_obj.get_value(row_idx)}"
+                        for sig_name, sig_obj in self.gflush_condition.signal_map.items()
+                        if sig_obj.get_value(row_idx) not in ("0", "*0")
                     ]
                     print(f"  Flush @ T={flush_time}: {', '.join(flush_signals[:5])}")
 

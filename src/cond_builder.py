@@ -17,7 +17,7 @@ class Condition:
         self,
         raw_expr: str,
         norm_expr: str,
-        evaluator: Callable[[Dict[str, Any]], bool],
+        evaluator: Callable[['Condition', Dict[str, Any]], bool],
         signals: List[Union[Signal, PatternSignal]],
         has_pattern: bool,
         pattern_var: str = ""
@@ -26,6 +26,7 @@ class Condition:
         self.norm_expr = norm_expr
         self.evaluator = evaluator
         self.signals = signals
+        self.signal_map: Dict[str, Signal] = {}
         self.has_pattern = has_pattern
         self.pattern_var = pattern_var
         
@@ -71,8 +72,7 @@ class Condition:
 
         Args:
             runtime_data: Dictionary containing:
-                - signal_values: Current time slice signal values
-                - signal_metadata: Signal objects with bit width info
+                - time: Current time index
                 - upstream_row: Dependency chain data (optional)
                 - upstream_data: Complete upstream results (optional)
                 - vars: Pattern variable bindings (modified by evaluator)
@@ -91,7 +91,7 @@ class Condition:
             )
         
         try:
-            return self.evaluator(runtime_data)
+            return self.evaluator(self, runtime_data)
         except Exception as e:
             raise ValueError(
                 f"[ERROR] Failed to evaluate condition '{self.raw_expr}': {e}"
@@ -101,10 +101,10 @@ class Condition:
 class ExpressionEvaluator(ast.NodeVisitor):
     """AST-based expression evaluator with custom operator support"""
 
-    def __init__(self, scope: str, runtime_data: Dict[str, Any]):
+    def __init__(self, scope: str, signal_map: Dict[str, Signal], runtime_data: Dict[str, Any]):
         self.scope = scope
-        self.signal_values = runtime_data.get("signal_values", {})
-        self.signal_metadata = runtime_data.get("signal_metadata", {})
+        self.time = runtime_data.get("time", 0)
+        self.signal_map = signal_map
         self.upstream_row = runtime_data.get("upstream_row", {})
         self.upstream_data = runtime_data.get("upstream_data", {})
         self._last_bitwidth = 0
@@ -204,15 +204,14 @@ class ExpressionEvaluator(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> Any:
         signal_name = self._get_name(node)
         signal = resolve_signal_path(signal_name, self.scope)
-        
+
         # Track bit width for $split
-        if signal in self.signal_metadata:
-            self._last_bitwidth = self.signal_metadata[signal].bit_width
-            
-        val_str = self.signal_values.get(signal, "0")
-        if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
-            return 0
-        return int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
+        if signal in self.signal_map:
+            signal_obj = self.signal_map[signal]
+            self._last_bitwidth = signal_obj.bit_width
+            return signal_obj.get_int_value(self.time)
+
+        return 0
 
     def visit_Call(self, node: ast.Call) -> Any:
         """Handle function calls, including custom operators like _split() and _contains()"""
@@ -291,15 +290,14 @@ class ExpressionEvaluator(ast.NodeVisitor):
             )
 
         signal = resolve_signal_path(name, self.scope)
-        
+
         # Track bit width for $split
-        if signal in self.signal_metadata:
-            self._last_bitwidth = self.signal_metadata[signal].bit_width
-            
-        val_str = self.signal_values.get(signal, "0")
-        if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
-            return 0
-        return int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
+        if signal in self.signal_map:
+            signal_obj = self.signal_map[signal]
+            self._last_bitwidth = signal_obj.bit_width
+            return signal_obj.get_int_value(self.time)
+
+        return 0
 
     def visit_Subscript(self, node: ast.Subscript) -> Any:
         signal_name = self._get_name(node.value)
@@ -337,12 +335,11 @@ class ExpressionEvaluator(ast.NodeVisitor):
                 )
         else:
             signal = resolve_signal_path(signal_name, self.scope)
-            val_str = self.signal_values.get(signal, "0")
-            val_int = (
-                0
-                if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*")
-                else int("0x" + val_str if not val_str.startswith("0x") else val_str, 16)
-            )
+            if signal in self.signal_map:
+                signal_obj = self.signal_map[signal]
+                val_int = signal_obj.get_int_value(self.time)
+            else:
+                val_int = 0
 
         if isinstance(node.slice, ast.Slice):
             # Python parses [31:0] as lower=31, upper=0
@@ -617,13 +614,13 @@ class ConditionBuilder:
         pattern_var: str,
         patterns: Optional[List[str]] = None,
         candidates: Optional[SignalGroup] = None,
-    ) -> Callable[[Dict[str, Any]], bool]:
+    ) -> Callable[['Condition', Dict[str, Any]], bool]:
         """Build unified evaluator for both simple and pattern conditions"""
 
         if not has_pattern:
             # Simple condition: direct evaluation
-            def evaluator(runtime_data: Dict[str, Any]) -> bool:
-                expr_eval = ExpressionEvaluator(scope, runtime_data)
+            def evaluator(cond: 'Condition', runtime_data: Dict[str, Any]) -> bool:
+                expr_eval = ExpressionEvaluator(scope, cond.signal_map, runtime_data)
                 return bool(expr_eval.eval(raw_expr))
 
             return evaluator
@@ -633,7 +630,7 @@ class ConditionBuilder:
         assert patterns is not None, "patterns required for pattern conditions"
         assert candidates is not None, "candidates required for pattern conditions"
 
-        def evaluator(runtime_data: Dict[str, Any]) -> bool:
+        def evaluator(cond: 'Condition', runtime_data: Dict[str, Any]) -> bool:
             def test_value(val: str) -> bool:
                 # Substitute pattern variable with candidate value
                 test_expr = raw_expr
@@ -642,7 +639,7 @@ class ConditionBuilder:
                         pattern, pattern.replace(f"{{{pattern_var}}}", val)
                     )
                 try:
-                    expr_eval = ExpressionEvaluator(scope, runtime_data)
+                    expr_eval = ExpressionEvaluator(scope, cond.signal_map, runtime_data)
                     result = bool(expr_eval.eval(test_expr))
                     return result
                 except (ValueError, RuntimeError, KeyError):

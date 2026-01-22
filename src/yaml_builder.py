@@ -29,6 +29,7 @@ class Task:
     logging: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     condition: Optional[Condition] = None  # Built Condition object, set later
+    signal_map: Dict[str, Signal] = field(default_factory=dict)  # Signal lookup map for capture
     match_mode: str = "all"  # Matching mode: "first", "all", "unique_per_var"
     max_match: int = 0  # Maximum matches per upstream trigger (0 = unlimited)
 
@@ -303,12 +304,13 @@ class YamlBuilder:
         return list(all_signals)
 
     def resolve_capture_signals(self) -> None:
-        """Resolve PatternSignal objects and populate their Signal references
+        """Resolve capture Signal objects and populate with FSDB waveform data
 
         After FSDB dump, this method:
         - Expands PatternSignal wildcard patterns to find matching signals
         - Populates PatternSignal.candidates and PatternSignal.resolved_signals
         - Populates regular Signal objects with waveform data from FSDB cache
+        - Updates task.capture and task.signal_map with fully resolved Signal objects
 
         Raises:
             RuntimeError: If called before FSDB signals are dumped
@@ -319,6 +321,7 @@ class YamlBuilder:
         tasks: List[Task] = self.config.get("tasks", [])
 
         for task in tasks:
+            resolved_capture: List[Signal] = []
             for sig in task.capture:
                 if sig.is_pattern():
                     # PatternSignal: expand and link to Signal objects
@@ -335,12 +338,10 @@ class YamlBuilder:
 
                     for sig_name in expanded_names:
                         # Extract variable value from expanded name
-                        # E.g., template="signal{idx}_data", expanded="signal2_data" → candidate="2"
                         template = pattern_sig.template
                         var_name = pattern_sig.variable_name
 
                         # Create regex pattern from template
-                        # Replace {var} with capture group
                         regex_pattern = re.escape(template).replace(
                             re.escape(f"{{{var_name}}}"), r"(\w+)"
                         )
@@ -353,9 +354,10 @@ class YamlBuilder:
                             # Look up Signal object from cache
                             normalized = Signal.normalize(sig_name)
                             if normalized in self._fsdb_builder._signals:
-                                resolved_signals.append(
-                                    self._fsdb_builder._signals[normalized]
-                                )
+                                cached_sig = self._fsdb_builder._signals[normalized]
+                                resolved_signals.append(cached_sig)
+                                if cached_sig not in resolved_capture:
+                                    resolved_capture.append(cached_sig)
 
                     # Populate PatternSignal with candidates and resolved signals
                     pattern_sig.set_candidates(
@@ -372,10 +374,15 @@ class YamlBuilder:
                         sig.values = cached_sig.values
                         sig.msb = cached_sig.msb
                         sig.lsb = cached_sig.lsb
+                        resolved_capture.append(sig)
                     else:
                         print(
                             f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'"
                         )
+            
+            # Update task capture list and signal_map
+            task.capture = resolved_capture
+            task.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_capture}
 
     def resolve_condition_signals(
         self, gflush_condition: Optional[Condition] = None
@@ -451,6 +458,8 @@ class YamlBuilder:
                     )
 
         # Replace Condition.signals with resolved Signal objects
+        # Update cond.signal_map with resolved Signal objects
+        cond.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_signals}
         cond.signals = resolved_signals
 
     def _normalize(self, value: Union[str, List[str]]) -> str:
