@@ -1,0 +1,494 @@
+#+#+#+#+#+#+#+#+###############################################################
+# RTU Instruction Lifecycle Tracker
+# 目标：追踪单条指令在 RTU/ROB 中的关键微架构事件
+# 重点：ROB Create → 执行完成 → 异常/分支判断 → Commit/Retire
+################################################################################
+
+fsdbFile: /home/c910/lingzichao/openc910/smart_run/work_force/novas.fsdb
+globalClock: tb.clk
+scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core
+
+output:
+  directory: rtu_inst_reports
+  verbose: true
+  timeout: 10000000
+
+globalFlush:
+  condition:
+    - "rtu_yy_xx_flush == 1'b1"
+    - "|| rtu_ifu_flush == 1'b1"
+    - "|| rtu_ifu_xx_expt_vld == 1'b1"
+
+tasks:
+
+  # ===========================================================================
+  # Stage 0: ROB Create (Trigger) - 4-way allocate from IDU
+  # ===========================================================================
+  - id: rob_create0
+    name: "ROB Create0"
+    matchMode: first
+    condition:
+      - "idu_rtu_rob_create0_en == 1'b1"
+    capture:
+      - idu_rtu_rob_create0_en
+      - idu_rtu_rob_create0_data
+      - rtu_idu_rob_inst0_iid
+      - ifu_rtu_cur_pc
+      - ifu_rtu_cur_pc_load
+    logging:
+      - "[ROB_CREATE0] iid={rtu_idu_rob_inst0_iid} data={idu_rtu_rob_create0_data:x} pc={ifu_rtu_cur_pc:x}"
+
+  - id: rob_create1
+    name: "ROB Create1"
+    matchMode: first
+    condition:
+      - "idu_rtu_rob_create1_en == 1'b1"
+    capture:
+      - idu_rtu_rob_create1_en
+      - idu_rtu_rob_create1_data
+      - rtu_idu_rob_inst1_iid
+      - ifu_rtu_cur_pc
+      - ifu_rtu_cur_pc_load
+    logging:
+      - "[ROB_CREATE1] iid={rtu_idu_rob_inst1_iid} data={idu_rtu_rob_create1_data:x} pc={ifu_rtu_cur_pc:x}"
+
+  - id: rob_create2
+    name: "ROB Create2"
+    matchMode: first
+    condition:
+      - "idu_rtu_rob_create2_en == 1'b1"
+    capture:
+      - idu_rtu_rob_create2_en
+      - idu_rtu_rob_create2_data
+      - rtu_idu_rob_inst2_iid
+      - ifu_rtu_cur_pc
+      - ifu_rtu_cur_pc_load
+    logging:
+      - "[ROB_CREATE2] iid={rtu_idu_rob_inst2_iid} data={idu_rtu_rob_create2_data:x} pc={ifu_rtu_cur_pc:x}"
+
+  - id: rob_create3
+    name: "ROB Create3"
+    matchMode: first
+    condition:
+      - "idu_rtu_rob_create3_en == 1'b1"
+    capture:
+      - idu_rtu_rob_create3_en
+      - idu_rtu_rob_create3_data
+      - rtu_idu_rob_inst3_iid
+      - ifu_rtu_cur_pc
+      - ifu_rtu_cur_pc_load
+    logging:
+      - "[ROB_CREATE3] iid={rtu_idu_rob_inst3_iid} data={idu_rtu_rob_create3_data:x} pc={ifu_rtu_cur_pc:x}"
+
+  # ===========================================================================
+  # Stage 1: Execution Completion (IU/LSU/VFPU)
+  # ===========================================================================
+  - id: rob_exec_cmplt0
+    name: "Execution Complete (IID match) - Create0"
+    dependsOn: rob_create0
+    matchMode: first
+    condition:
+      - "(iu_rtu_pipe0_cmplt == 1'b1 && iu_rtu_pipe0_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (iu_rtu_pipe1_cmplt == 1'b1 && iu_rtu_pipe1_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (iu_rtu_pipe2_cmplt == 1'b1 && iu_rtu_pipe2_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (lsu_rtu_wb_pipe3_cmplt == 1'b1 && lsu_rtu_wb_pipe3_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (lsu_rtu_wb_pipe4_cmplt == 1'b1 && lsu_rtu_wb_pipe4_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (vfpu_rtu_pipe6_cmplt == 1'b1 && vfpu_rtu_pipe6_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (vfpu_rtu_pipe7_cmplt == 1'b1 && vfpu_rtu_pipe7_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+    capture:
+      - iu_rtu_pipe0_cmplt
+      - iu_rtu_pipe0_iid
+      - iu_rtu_pipe0_expt_vld
+      - iu_rtu_pipe0_expt_vec
+      - iu_rtu_pipe0_abnormal
+      - iu_rtu_pipe2_bht_mispred
+      - iu_rtu_pipe2_jmp_mispred
+      - lsu_rtu_wb_pipe3_cmplt
+      - lsu_rtu_wb_pipe3_iid
+      - lsu_rtu_wb_pipe3_expt_vld
+      - lsu_rtu_wb_pipe3_expt_vec
+      - lsu_rtu_wb_pipe3_abnormal
+      - lsu_rtu_wb_pipe3_mtval
+      - lsu_rtu_wb_pipe4_cmplt
+      - lsu_rtu_wb_pipe4_iid
+      - lsu_rtu_wb_pipe4_expt_vld
+      - lsu_rtu_wb_pipe4_expt_vec
+      - lsu_rtu_wb_pipe4_abnormal
+      - lsu_rtu_wb_pipe4_mtval
+      - vfpu_rtu_pipe6_cmplt
+      - vfpu_rtu_pipe6_iid
+      - vfpu_rtu_pipe7_cmplt
+      - vfpu_rtu_pipe7_iid
+    logging:
+      - "[EXEC_CMPLT0] iid={ $dep.rob_create0.rtu_idu_rob_inst0_iid }"
+
+  - id: rob_exec_cmplt1
+    name: "Execution Complete (IID match) - Create1"
+    dependsOn: rob_create1
+    matchMode: first
+    condition:
+      - "(iu_rtu_pipe0_cmplt == 1'b1 && iu_rtu_pipe0_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (iu_rtu_pipe1_cmplt == 1'b1 && iu_rtu_pipe1_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (iu_rtu_pipe2_cmplt == 1'b1 && iu_rtu_pipe2_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (lsu_rtu_wb_pipe3_cmplt == 1'b1 && lsu_rtu_wb_pipe3_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (lsu_rtu_wb_pipe4_cmplt == 1'b1 && lsu_rtu_wb_pipe4_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (vfpu_rtu_pipe6_cmplt == 1'b1 && vfpu_rtu_pipe6_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (vfpu_rtu_pipe7_cmplt == 1'b1 && vfpu_rtu_pipe7_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+    capture:
+      - iu_rtu_pipe0_cmplt
+      - iu_rtu_pipe0_iid
+      - iu_rtu_pipe0_expt_vld
+      - iu_rtu_pipe0_expt_vec
+      - iu_rtu_pipe0_abnormal
+      - iu_rtu_pipe2_bht_mispred
+      - iu_rtu_pipe2_jmp_mispred
+      - lsu_rtu_wb_pipe3_cmplt
+      - lsu_rtu_wb_pipe3_iid
+      - lsu_rtu_wb_pipe3_expt_vld
+      - lsu_rtu_wb_pipe3_expt_vec
+      - lsu_rtu_wb_pipe3_abnormal
+      - lsu_rtu_wb_pipe3_mtval
+      - lsu_rtu_wb_pipe4_cmplt
+      - lsu_rtu_wb_pipe4_iid
+      - lsu_rtu_wb_pipe4_expt_vld
+      - lsu_rtu_wb_pipe4_expt_vec
+      - lsu_rtu_wb_pipe4_abnormal
+      - lsu_rtu_wb_pipe4_mtval
+      - vfpu_rtu_pipe6_cmplt
+      - vfpu_rtu_pipe6_iid
+      - vfpu_rtu_pipe7_cmplt
+      - vfpu_rtu_pipe7_iid
+    logging:
+      - "[EXEC_CMPLT1] iid={ $dep.rob_create1.rtu_idu_rob_inst1_iid }"
+
+  - id: rob_exec_cmplt2
+    name: "Execution Complete (IID match) - Create2"
+    dependsOn: rob_create2
+    matchMode: first
+    condition:
+      - "(iu_rtu_pipe0_cmplt == 1'b1 && iu_rtu_pipe0_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (iu_rtu_pipe1_cmplt == 1'b1 && iu_rtu_pipe1_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (iu_rtu_pipe2_cmplt == 1'b1 && iu_rtu_pipe2_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (lsu_rtu_wb_pipe3_cmplt == 1'b1 && lsu_rtu_wb_pipe3_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (lsu_rtu_wb_pipe4_cmplt == 1'b1 && lsu_rtu_wb_pipe4_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (vfpu_rtu_pipe6_cmplt == 1'b1 && vfpu_rtu_pipe6_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (vfpu_rtu_pipe7_cmplt == 1'b1 && vfpu_rtu_pipe7_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+    capture:
+      - iu_rtu_pipe0_cmplt
+      - iu_rtu_pipe0_iid
+      - iu_rtu_pipe0_expt_vld
+      - iu_rtu_pipe0_expt_vec
+      - iu_rtu_pipe0_abnormal
+      - iu_rtu_pipe2_bht_mispred
+      - iu_rtu_pipe2_jmp_mispred
+      - lsu_rtu_wb_pipe3_cmplt
+      - lsu_rtu_wb_pipe3_iid
+      - lsu_rtu_wb_pipe3_expt_vld
+      - lsu_rtu_wb_pipe3_expt_vec
+      - lsu_rtu_wb_pipe3_abnormal
+      - lsu_rtu_wb_pipe3_mtval
+      - lsu_rtu_wb_pipe4_cmplt
+      - lsu_rtu_wb_pipe4_iid
+      - lsu_rtu_wb_pipe4_expt_vld
+      - lsu_rtu_wb_pipe4_expt_vec
+      - lsu_rtu_wb_pipe4_abnormal
+      - lsu_rtu_wb_pipe4_mtval
+      - vfpu_rtu_pipe6_cmplt
+      - vfpu_rtu_pipe6_iid
+      - vfpu_rtu_pipe7_cmplt
+      - vfpu_rtu_pipe7_iid
+    logging:
+      - "[EXEC_CMPLT2] iid={ $dep.rob_create2.rtu_idu_rob_inst2_iid }"
+
+  - id: rob_exec_cmplt3
+    name: "Execution Complete (IID match) - Create3"
+    dependsOn: rob_create3
+    matchMode: first
+    condition:
+      - "(iu_rtu_pipe0_cmplt == 1'b1 && iu_rtu_pipe0_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (iu_rtu_pipe1_cmplt == 1'b1 && iu_rtu_pipe1_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (iu_rtu_pipe2_cmplt == 1'b1 && iu_rtu_pipe2_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (lsu_rtu_wb_pipe3_cmplt == 1'b1 && lsu_rtu_wb_pipe3_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (lsu_rtu_wb_pipe4_cmplt == 1'b1 && lsu_rtu_wb_pipe4_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (vfpu_rtu_pipe6_cmplt == 1'b1 && vfpu_rtu_pipe6_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (vfpu_rtu_pipe7_cmplt == 1'b1 && vfpu_rtu_pipe7_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+    capture:
+      - iu_rtu_pipe0_cmplt
+      - iu_rtu_pipe0_iid
+      - iu_rtu_pipe0_expt_vld
+      - iu_rtu_pipe0_expt_vec
+      - iu_rtu_pipe0_abnormal
+      - iu_rtu_pipe2_bht_mispred
+      - iu_rtu_pipe2_jmp_mispred
+      - lsu_rtu_wb_pipe3_cmplt
+      - lsu_rtu_wb_pipe3_iid
+      - lsu_rtu_wb_pipe3_expt_vld
+      - lsu_rtu_wb_pipe3_expt_vec
+      - lsu_rtu_wb_pipe3_abnormal
+      - lsu_rtu_wb_pipe3_mtval
+      - lsu_rtu_wb_pipe4_cmplt
+      - lsu_rtu_wb_pipe4_iid
+      - lsu_rtu_wb_pipe4_expt_vld
+      - lsu_rtu_wb_pipe4_expt_vec
+      - lsu_rtu_wb_pipe4_abnormal
+      - lsu_rtu_wb_pipe4_mtval
+      - vfpu_rtu_pipe6_cmplt
+      - vfpu_rtu_pipe6_iid
+      - vfpu_rtu_pipe7_cmplt
+      - vfpu_rtu_pipe7_iid
+    logging:
+      - "[EXEC_CMPLT3] iid={ $dep.rob_create3.rtu_idu_rob_inst3_iid }"
+
+  # ===========================================================================
+  # Stage 2: Retire Window (ROB read/retire slot 0/1/2)
+  # ===========================================================================
+  - id: rob_retire0
+    name: "ROB Retire Slot Match - Create0"
+    dependsOn: rob_exec_cmplt0
+    matchMode: first
+    condition:
+      - "(x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+    capture:
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_jmp_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_bht_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_spec_fail
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_miss
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_hit
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_mtval
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_next_pc
+    logging:
+      - "[ROB_RETIRE0] iid={ $dep.rob_create0.rtu_idu_rob_inst0_iid } expt={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld} int={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld}"
+
+  - id: rob_retire1
+    name: "ROB Retire Slot Match - Create1"
+    dependsOn: rob_exec_cmplt1
+    matchMode: first
+    condition:
+      - "(x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+    capture:
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_jmp_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_bht_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_spec_fail
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_miss
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_hit
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_mtval
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_next_pc
+    logging:
+      - "[ROB_RETIRE1] iid={ $dep.rob_create1.rtu_idu_rob_inst1_iid } expt={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld} int={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld}"
+
+  - id: rob_retire2
+    name: "ROB Retire Slot Match - Create2"
+    dependsOn: rob_exec_cmplt2
+    matchMode: first
+    condition:
+      - "(x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+    capture:
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_jmp_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_bht_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_spec_fail
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_miss
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_hit
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_mtval
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_next_pc
+    logging:
+      - "[ROB_RETIRE2] iid={ $dep.rob_create2.rtu_idu_rob_inst2_iid } expt={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld} int={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld}"
+
+  - id: rob_retire3
+    name: "ROB Retire Slot Match - Create3"
+    dependsOn: rob_exec_cmplt3
+    matchMode: first
+    condition:
+      - "(x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld == 1'b1 && x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+    capture:
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vec
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_jmp_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_bht_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_spec_fail
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_mispred
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_miss
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_no_spec_hit
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_mtval
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst1_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst1_next_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_vld
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_pst_retire_inst2_iid
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_cur_pc
+      - x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst2_next_pc
+    logging:
+      - "[ROB_RETIRE3] iid={ $dep.rob_create3.rtu_idu_rob_inst3_iid } expt={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_expt_vld} int={x_ct_rtu_top.x_ct_rtu_rob.rob_retire_inst0_int_vld}"
+
+  # ===========================================================================
+  # Stage 3: Commit / Retire to architectural state
+  # ===========================================================================
+  - id: commit0
+    name: "RTU Commit (IID match) - Create0"
+    dependsOn: rob_retire0
+    matchMode: first
+    condition:
+      - "(rtu_yy_xx_commit0 == 1'b1 && rtu_yy_xx_commit0_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (rtu_yy_xx_commit1 == 1'b1 && rtu_yy_xx_commit1_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+      - "|| (rtu_yy_xx_commit2 == 1'b1 && rtu_yy_xx_commit2_iid == $dep.rob_create0.rtu_idu_rob_inst0_iid)"
+    capture:
+      - rtu_yy_xx_commit0
+      - rtu_yy_xx_commit0_iid
+      - rtu_yy_xx_commit1
+      - rtu_yy_xx_commit1_iid
+      - rtu_yy_xx_commit2
+      - rtu_yy_xx_commit2_iid
+      - rtu_pad_retire0
+      - rtu_pad_retire0_pc
+      - rtu_pad_retire1
+      - rtu_pad_retire1_pc
+      - rtu_pad_retire2
+      - rtu_pad_retire2_pc
+      - rtu_yy_xx_retire0
+      - rtu_yy_xx_retire1
+      - rtu_yy_xx_retire2
+    logging:
+      - "[COMMIT0] iid={ $dep.rob_create0.rtu_idu_rob_inst0_iid }"
+
+  - id: commit1
+    name: "RTU Commit (IID match) - Create1"
+    dependsOn: rob_retire1
+    matchMode: first
+    condition:
+      - "(rtu_yy_xx_commit0 == 1'b1 && rtu_yy_xx_commit0_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (rtu_yy_xx_commit1 == 1'b1 && rtu_yy_xx_commit1_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+      - "|| (rtu_yy_xx_commit2 == 1'b1 && rtu_yy_xx_commit2_iid == $dep.rob_create1.rtu_idu_rob_inst1_iid)"
+    capture:
+      - rtu_yy_xx_commit0
+      - rtu_yy_xx_commit0_iid
+      - rtu_yy_xx_commit1
+      - rtu_yy_xx_commit1_iid
+      - rtu_yy_xx_commit2
+      - rtu_yy_xx_commit2_iid
+      - rtu_pad_retire0
+      - rtu_pad_retire0_pc
+      - rtu_pad_retire1
+      - rtu_pad_retire1_pc
+      - rtu_pad_retire2
+      - rtu_pad_retire2_pc
+      - rtu_yy_xx_retire0
+      - rtu_yy_xx_retire1
+      - rtu_yy_xx_retire2
+    logging:
+      - "[COMMIT1] iid={ $dep.rob_create1.rtu_idu_rob_inst1_iid }"
+
+  - id: commit2
+    name: "RTU Commit (IID match) - Create2"
+    dependsOn: rob_retire2
+    matchMode: first
+    condition:
+      - "(rtu_yy_xx_commit0 == 1'b1 && rtu_yy_xx_commit0_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (rtu_yy_xx_commit1 == 1'b1 && rtu_yy_xx_commit1_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+      - "|| (rtu_yy_xx_commit2 == 1'b1 && rtu_yy_xx_commit2_iid == $dep.rob_create2.rtu_idu_rob_inst2_iid)"
+    capture:
+      - rtu_yy_xx_commit0
+      - rtu_yy_xx_commit0_iid
+      - rtu_yy_xx_commit1
+      - rtu_yy_xx_commit1_iid
+      - rtu_yy_xx_commit2
+      - rtu_yy_xx_commit2_iid
+      - rtu_pad_retire0
+      - rtu_pad_retire0_pc
+      - rtu_pad_retire1
+      - rtu_pad_retire1_pc
+      - rtu_pad_retire2
+      - rtu_pad_retire2_pc
+      - rtu_yy_xx_retire0
+      - rtu_yy_xx_retire1
+      - rtu_yy_xx_retire2
+    logging:
+      - "[COMMIT2] iid={ $dep.rob_create2.rtu_idu_rob_inst2_iid }"
+
+  - id: commit3
+    name: "RTU Commit (IID match) - Create3"
+    dependsOn: rob_retire3
+    matchMode: first
+    condition:
+      - "(rtu_yy_xx_commit0 == 1'b1 && rtu_yy_xx_commit0_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (rtu_yy_xx_commit1 == 1'b1 && rtu_yy_xx_commit1_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+      - "|| (rtu_yy_xx_commit2 == 1'b1 && rtu_yy_xx_commit2_iid == $dep.rob_create3.rtu_idu_rob_inst3_iid)"
+    capture:
+      - rtu_yy_xx_commit0
+      - rtu_yy_xx_commit0_iid
+      - rtu_yy_xx_commit1
+      - rtu_yy_xx_commit1_iid
+      - rtu_yy_xx_commit2
+      - rtu_yy_xx_commit2_iid
+      - rtu_pad_retire0
+      - rtu_pad_retire0_pc
+      - rtu_pad_retire1
+      - rtu_pad_retire1_pc
+      - rtu_pad_retire2
+      - rtu_pad_retire2_pc
+      - rtu_yy_xx_retire0
+      - rtu_yy_xx_retire1
+      - rtu_yy_xx_retire2
+    logging:
+      - "[COMMIT3] iid={ $dep.rob_create3.rtu_idu_rob_inst3_iid }"

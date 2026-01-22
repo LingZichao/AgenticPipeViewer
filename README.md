@@ -2,6 +2,11 @@
 
 ---
 
+### Quick Test
+```bash
+    python3 view.py -c tests/ifu_dep.yaml
+```
+
 TODO:
 
 * localFlush

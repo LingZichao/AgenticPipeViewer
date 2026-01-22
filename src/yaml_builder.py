@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
-from .utils import resolve_signal_path, Signal, PatternSignal
+from .base import resolve_signal_path, Signal, PatternSignal
 from .cond_builder import Condition, ConditionBuilder
 from .yaml_validator import YamlValidator
 from .fsdb_builder import FsdbBuilder
@@ -608,7 +608,7 @@ class YamlBuilder:
             {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]}
             {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]:x}
         """
-        from .utils import Signal
+        from .base import Signal
 
         context: Dict[str, Any] = {"__time__": row_idx}
 

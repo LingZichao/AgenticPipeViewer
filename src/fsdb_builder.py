@@ -6,7 +6,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-from .utils import Signal, resolve_signal_path
+from .base import Signal, resolve_signal_path
 
 
 class FsdbBuilder:

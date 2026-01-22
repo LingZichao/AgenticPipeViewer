@@ -1,0 +1,154 @@
+# =============================================================================
+# IFU Per-Instruction Lifecycle Tracker
+# =============================================================================
+#
+# 设计原则：追踪单条指令的完整生命周期，而非硬件流水线阶段
+#
+# 核心机制：
+#   1. 指令唯一标识：PC + h{n}_data (halfword数据)
+#   2. Fork点：IP stage decode时，为每个有效halfword创建独立trace
+#   3. 指令匹配：后续阶段通过inst_data匹配上游h{n}_data
+#
+# 硬件结构：
+#   IP Stage: h0-h7 = 8个halfword位置（16-bit），h0是当前PC起始位置
+#   IB Stage: inst0/1/2 = 配对后的3条指令，准备发送到IDU
+#
+# =============================================================================
+
+fsdbFile: /home/c910/lingzichao/openc910/smart_run/work_force/novas.fsdb
+globalClock: tb.clk
+scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.x_ct_ifu_top
+
+output:
+  directory: ifu_per_inst_reports
+  verbose: true
+  timeout: 1000000
+
+globalFlush:
+  condition:
+    - "rtu_ifu_flush == 1'b1"
+    - "|| rtu_ifu_xx_expt_vld == 1'b1"
+    - "|| had_ifu_pcload == 1'b1"
+
+tasks:
+
+  # ===========================================================================
+  # Stage 1: Fetch Complete (Trigger) - Unified Entry Point
+  # ===========================================================================
+  # 优化说明：直接以 Pipedown 作为 Trace 起点。
+  # Pipedown 代表指令已成功从 ICache/Refill 逻辑中取回，并确定要进入流水线。
+  # 这过滤掉了未命中的、被 Flush 掉的无效请求，专注于“有效指令生命周期”。
+  - id: fetch_complete
+    name: "IF Stage Pipedown (Fetch Complete)"
+    matchMode: first
+    condition:
+      - "ifctrl_ifdp_pipedown == 1'b1"
+    capture:
+      - pcgen_ifctrl_pc
+    logging:
+      - "[FETCH_DONE] pc={pcgen_ifctrl_pc:x}"
+
+  - id: icache_miss
+    name: "ICache Miss (Debug)"
+    dependsOn: fetch_complete
+    matchMode: first
+    condition:
+      - "l1_refill_ifctrl_start == 1'b1"
+      # 注意：Miss实际上发生在Pipedown之前。如果这里依赖Fetch Complete，
+      # 只能捕获到 Refill 之后的 *下一次* 同样的 PC 的 Miss（如果有的话），
+      # 或者如果在同一时间窗口内信号保持。仅作Debug参考。
+      - "&& l1_refill_ifctrl_pc == $dep.fetch_complete.pcgen_ifctrl_pc"
+    capture:
+      - l1_refill_ifctrl_pc
+    logging:
+      - "[ICACHE_MISS] pc={l1_refill_ifctrl_pc:x}"
+
+  # - id: biu_request
+  #   name: "BIU Request - Fetch from Memory"
+  #   dependsOn: icache_miss
+  #   matchMode: first
+  #   condition:
+  #     - "ifu_biu_rd_req == 1'b1"
+  #     - "&& ifu_biu_rd_id == 1'b0"
+  #   capture:
+  #     - ifu_biu_rd_req
+  #     - ifu_biu_rd_addr
+  #     - ifu_biu_rd_id
+  #   logging:
+  #     - "[BIU_REQ] addr={ifu_biu_rd_addr:x} pc={$dep.icache_miss.l1_refill_ifctrl_pc:x}"
+
+  # - id: biu_response
+  #   name: "BIU Response - Data Return"
+  #   dependsOn: biu_request
+  #   matchMode: first
+  #   condition:
+  #     - "biu_ifu_rd_data_vld == 1'b1"
+  #     - "&& biu_ifu_rd_id == 1'b0"
+  #   capture:
+  #     - biu_ifu_rd_data
+  #     - biu_ifu_rd_last
+  #     - biu_ifu_rd_resp
+  #   logging:
+  #     - "[BIU_RSP] data={biu_ifu_rd_data:x} last={biu_ifu_rd_last} resp={biu_ifu_rd_resp} pc={$dep.icache_miss.l1_refill_ifctrl_pc:x}"
+
+  # ===========================================================================
+  # Stage 3: No Fork at IP Stage - Wait for IB Stage
+  # ===========================================================================
+  # 说明：IP stage输出8个halfword，但实际指令数量由IB stage决定
+  #   - hn_vld[7:0]表示halfword是否有效，但不代表指令起始位置
+  #   - 32-bit指令占2个halfword，16-bit指令占1个halfword
+  #   - 最终指令数由ibctrl_ibuf_create_vld
+  # 
+  # ===========================================================================
+  - id: ifdp_buffer_entry
+    name: "IFDP Buffer Entry (128b Line)"
+    dependsOn: fetch_complete
+    matchMode: first
+
+    condition:
+      - "ifctrl_ifdp_pipedown == 1'b1"
+    capture:
+      - x_ct_ifu_ifdp.ifdp_inst_data0
+      - x_ct_ifu_ifdp.ifdp_inst_data1
+      - ifdp_ipdp_vpc
+    logging:
+      - "[IFDP_ENTRY] vpc={ifdp_ipdp_vpc:x} data0={x_ct_ifu_ifdp.ifdp_inst_data0:x} data1={x_ct_ifu_ifdp.ifdp_inst_data1:x}"
+
+  # ==========================================================================
+  # Stage 4: IFDP Buffer Match - 关键中间信号
+  # ==========================================================================
+  # 目标：交汇点处记录4指令buffer，并以way0/way1分别追踪
+  # 方式：使用{idx}模式变量匹配ifu_idu_ib_inst{idx}，
+  #       同时校验指令内容与PC
+  # ===========================================================================
+
+  - id: ifdp_way0_match
+    name: "IFDP Way0 -> IDU Match"
+    dependsOn: ifdp_buffer_entry
+    matchMode: all
+    maxMatch: 4
+    condition:
+      - "ifu_idu_ib_inst{idx}_vld == 1'b1"
+      - "&& ifu_idu_ib_inst{idx}_data[15:0] <@ $dep.ifdp_buffer_entry.ifdp_inst_data0.$split(8)"
+      # TODO: now ignore the pc offset
+      # - "&& ifu_idu_ib_inst{idx}_data[63:53] == $dep.ifdp_buffer_entry.ifdp_ipdp_vpc[14:4]"
+    capture:
+      - ifu_idu_ib_inst{idx}_data
+    logging:
+      - "[IFDP_WAY0] lane{idx} data={ifu_idu_ib_inst{idx}_data:x}"
+
+  - id: ifdp_way1_match
+    name: "IFDP Way1 -> IDU Match"
+    dependsOn: ifdp_buffer_entry
+    matchMode: all
+    maxMatch: 4
+    condition:
+      - "ifu_idu_ib_inst{idx}_vld == 1'b1"
+      - "&& ifu_idu_ib_inst{idx}_data[15:0] <@ $dep.ifdp_buffer_entry.ifdp_inst_data1.$split(8)"
+      # - "&& ifu_idu_ib_inst{idx}_data[63:53] == $dep.ifdp_buffer_entry.ifdp_ipdp_vpc[14:4]"
+    capture:
+      - ifu_idu_ib_inst{idx}_data
+    logging:
+      - "[IFDP_WAY1] lane{idx} data={ifu_idu_ib_inst{idx}_data:x}"
+
+

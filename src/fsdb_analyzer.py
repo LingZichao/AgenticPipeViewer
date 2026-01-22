@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from .base import Signal
 from .yaml_builder import YamlBuilder, Task
 from .cond_builder import ConditionBuilder, Condition
-from .utils import resolve_signal_path, Signal
 
 
 class FsdbAnalyzer:

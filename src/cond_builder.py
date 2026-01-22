@@ -2,7 +2,7 @@
 import re
 import ast
 from typing import Any, Callable, Dict, List, Optional, Tuple, Set, Union
-from .utils import resolve_signal_path, verilog_to_int, split_signal, SignalGroup, Signal, PatternSignal
+from .base import resolve_signal_path, verilog_to_int, split_signal, SignalGroup, Signal, PatternSignal
 
 
 class Condition:
