@@ -65,7 +65,7 @@ class FsdbBuilder:
         self._signals_list = signals
         return {sig: self._signals_vidcode_map.get(sig, -1) for sig in signals}
 
-    def get_signal(self, signal: str) -> List[str]:
+    def get_signal(self, signal: str) -> Signal:
         """Get single cached Signal object by normalized name"""
         if signal in self._signals:
             return self._signals[signal]
