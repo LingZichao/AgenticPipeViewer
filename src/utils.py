@@ -4,7 +4,7 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Union, Sequence, Optional, Dict
+from typing import List, Union, Sequence, Optional, Dict, Any
 
 class Signal:
     """Represents a signal with its metadata and captured values"""
@@ -44,6 +44,10 @@ class Signal:
     def get_template(self) -> str:
         """Get template string for expansion (returns raw_name for regular Signal)"""
         return self.raw_name
+
+    def resolve(self, var_bindings: Dict[str, Any]) -> str:
+        """Resolve signal path (no expansion for regular Signal)"""
+        return resolve_signal_path(self.raw_name, self.scope)
 
     @staticmethod
     def normalize(name: str) -> str:
@@ -235,7 +239,7 @@ class PatternSignal:
         Returns:
             New Signal instance with expanded name
         """
-        expanded_name = self.expand(var_bindings)
+        expanded_name = self.resolve(var_bindings)
         return Signal(raw_name=expanded_name, scope=self.scope)
     
     def get_resolved_signal(self, var_bindings: Dict[str, str]) -> Optional[Signal]:
@@ -247,33 +251,32 @@ class PatternSignal:
         Returns:
             Signal object matching the expanded template, or None if not found
         """
-        expanded_name = self.expand(var_bindings)
+        expanded_name = self.resolve(var_bindings)
         for sig in self.resolved_signals:
             if sig.raw_name == expanded_name or sig.name == Signal.normalize(expanded_name):
                 return sig
         return None
 
-    def expand(self, var_bindings: Dict[str, str]) -> str:
-        """Expand template with bound variable value
+    def resolve(self, var_bindings: Dict[str, str]) -> str:
+        """Resolve signal path by expanding template with variable bindings
 
         Args:
             var_bindings: Dictionary mapping variable names to values
 
         Returns:
-            Expanded signal name with variable substituted
-
-        Example:
-            >>> ps = PatternSignal("signal{idx}_data")
-            >>> ps.expand({"idx": "2"})
-            "signal2_data"
+            Expanded and scope-resolved signal name
         """
-        if self.variable_name not in var_bindings:
-            raise ValueError(
-                f"Variable '{self.variable_name}' not found in bindings: {var_bindings}"
-            )
+        sig = self.template
+        # Apply all available variable bindings
+        for var_name, var_val in var_bindings.items():
+            sig = sig.replace(f"{{{var_name}}}", str(var_val))
+        
+        # Ensure path is fully resolved with scope
+        return resolve_signal_path(sig, self.scope)
 
-        value = var_bindings[self.variable_name]
-        return self.template.replace(f"{{{self.variable_name}}}", value)
+    def expand(self, var_bindings: Dict[str, str]) -> str:
+        """Alias for resolve() for backward compatibility"""
+        return self.resolve(var_bindings)
 
     def expand_all(self) -> List[str]:
         """Expand template with all candidate values

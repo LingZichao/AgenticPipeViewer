@@ -125,28 +125,10 @@ class FsdbAnalyzer:
 
         self.trace_lifecycle[trace_id].append(event)
 
-    def _expand_templates(
-        self, templates: List[str], vars: Dict[str, str], scope: str
-    ) -> List[str]:
-        """Expand signal templates with resolved variables after condition evaluation"""
-        signals = []
-        for tmpl in templates:
-            if isinstance(tmpl, str) and "{" in tmpl:
-                sig = tmpl
-                for var_name, var_val in vars.items():
-                    sig = sig.replace(f"{{{var_name}}}", var_val)
-                sig = resolve_signal_path(sig, scope)
-                signals.append(sig)
-            else:
-                signals.append(tmpl)
-        return signals
 
     def _trace_trigger(self, task: Task) -> List[Dict[str, Any]]:
         """Trigger mode: match conditions globally, each match starts new trace"""
-        # Extract templates from Signal/PatternSignal objects
-        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture]
-        print(f"Evaluating condition for {len(templates)} signal(s)")
+        print(f"Evaluating condition for {len(task.capture)} signal(s)")
 
         # Debug mode message
         if self.debug_num > 0:
@@ -186,7 +168,7 @@ class FsdbAnalyzer:
                     vars = runtime_data.get("vars", {})
 
                     # Expand capture templates with matched variables
-                    signals = self._expand_templates(templates, vars, task.scope or "")
+                    signals = [sig.resolve(vars) for sig in task.capture]
 
                     # Use global trace_id counter
                     current_trace_id = self.next_trace_id
@@ -244,9 +226,6 @@ class FsdbAnalyzer:
         - "all": Capture ALL matches in time window (default)
         - "unique_per_var": One match per unique pattern variable combination
         """
-        # Extract templates from Signal/PatternSignal objects
-        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture]
         depends = task.deps
         dep_id = depends[0] if depends else None
         match_mode = task.match_mode  # "first", "all", "unique_per_var"
@@ -363,7 +342,7 @@ class FsdbAnalyzer:
                                 # Original behavior: capture first match, break
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -377,7 +356,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (time={current_time})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -395,7 +374,7 @@ class FsdbAnalyzer:
 
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -409,7 +388,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -421,7 +400,7 @@ class FsdbAnalyzer:
                                 # Capture ALL matches in time window
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -435,7 +414,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -464,7 +443,6 @@ class FsdbAnalyzer:
         fork_id: int,
         upstream_fork_path: List[int],
         vars: Dict[str, str],
-        templates: List[str],
         task: Task,
         upstream_row: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -476,7 +454,6 @@ class FsdbAnalyzer:
             fork_id: Fork index within this trace
             upstream_fork_path: Fork path from upstream row
             vars: Matched pattern variables
-            templates: Capture signal templates
             task: Task configuration
             upstream_row: Upstream row data (for dependency chain propagation)
 
@@ -484,7 +461,7 @@ class FsdbAnalyzer:
             Row data dictionary with trace info and captured values
         """
         # Expand capture templates with matched variables
-        signals = self._expand_templates(templates, vars, task.scope or "")
+        signals = [sig.resolve(vars) for sig in task.capture]
 
         row_data: Dict[str, Any] = {
             "time": row_idx,
@@ -728,10 +705,6 @@ class FsdbAnalyzer:
 
     def _capture_task(self, task: Task) -> str:
         """Execute capture mode task"""
-        # Extract templates from Signal/PatternSignal objects
-        templates = [sig.get_template() if sig.is_pattern() else sig.raw_name 
-                    for sig in task.capture]
-        
         # Detect trace mode using pre-analyzed flag
         if task.deps:
             # Trace: match from upstream
@@ -743,7 +716,7 @@ class FsdbAnalyzer:
         # Store to memory
         self.runtime_data[task.id] = {
             "rows": matched_rows,
-            "capd": templates,  # All captured signal templates available for reference
+            "capd": [sig.get_template() for sig in task.capture],  # All captured signal templates available for reference
         }
 
         print(f"Matched {len(matched_rows)} rows")

@@ -380,8 +380,9 @@ class YamlBuilder:
                             f"[WARN] Signal '{normalized}' not found in FSDB cache for task '{task.id}'"
                         )
             
-            # Update task capture list and signal_map
-            task.capture = resolved_capture
+            # Update task signal_map with all resolved Signal objects
+            # Note: We keep task.capture as the original list (Signal/PatternSignal)
+            # to support runtime resolution via sig.resolve(vars)
             task.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_capture}
 
     def resolve_condition_signals(
@@ -457,10 +458,10 @@ class YamlBuilder:
                         f"[WARN] Signal '{normalized}' not found in FSDB cache for condition"
                     )
 
-        # Replace Condition.signals with resolved Signal objects
         # Update cond.signal_map with resolved Signal objects
+        # Note: We keep cond.signals as the original list (Signal/PatternSignal)
+        # to support runtime resolution if needed
         cond.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_signals}
-        cond.signals = resolved_signals
 
     def _normalize(self, value: Union[str, List[str]]) -> str:
         """Normalize string or list of strings to single space-joined string"""
