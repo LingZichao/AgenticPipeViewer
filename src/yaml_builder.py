@@ -4,18 +4,24 @@ import re
 from pathlib import Path
 from typing import Union, Any, List, Optional, Dict, Tuple, Set
 from dataclasses import dataclass, field
-from utils import resolve_signal_path
-from condition_builder import Condition
+from .base import resolve_signal_path, Signal, PatternSignal
+from .cond_builder import Condition, ConditionBuilder
+from .yaml_validator import YamlValidator
+from .fsdb_builder import FsdbBuilder
+
 
 @dataclass
 class Task:
-    """Task configuration data structure"""
+    """Task configuration data structure
+
+    Capture signals are parsed at YAML load time:
+    - Regular signals → Signal objects
+    - Pattern signals (with {var}) → PatternSignal objects
+    """
 
     id: str
-    capture: List[str]
+    capture: List[Union[Signal, PatternSignal]]  # Parsed from YAML capture field
     raw_condition: str
-    has_dep_in_condition: bool
-    has_pattern_in_capture: bool
 
     name: Optional[str] = None
     scope: Optional[str] = None
@@ -23,14 +29,16 @@ class Task:
     logging: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     condition: Optional[Condition] = None  # Built Condition object, set later
+    signal_map: Dict[str, Signal] = field(default_factory=dict)  # Signal lookup map for capture
     match_mode: str = "all"  # Matching mode: "first", "all", "unique_per_var"
     max_match: int = 0  # Maximum matches per upstream trigger (0 = unlimited)
 
     @classmethod
-    def from_dict(
-        cls, data: Dict[str, Any], global_scope: str, yaml_builder: "YamlBuilder"
-    ) -> "Task":
-        """Create Task from dictionary with all preprocessing"""
+    def from_dict(cls, data: Dict[str, Any], global_scope: str) -> "Task":
+        """Create Task from dictionary with all preprocessing
+
+        Parses capture strings into Signal/PatternSignal objects at load time.
+        """
         task_scope = data.get("scope", "")
         # Calculate final scope: task scope overrides global scope
         final_scope = task_scope if task_scope else global_scope
@@ -38,57 +46,48 @@ class Task:
         raw_capture = data.get("capture", [])
         raw_condition = data.get("condition", "")
 
-        # Resolve capture signals to final form
-        capture = yaml_builder.resolve_capture_signals(raw_capture, final_scope)
-
-        # Analyze condition and capture
-        has_dep = "$dep." in raw_condition
-        has_pattern = any("{" in str(sig) and "}" in str(sig) for sig in raw_capture)
-
-        task_id = data.get("id")
-        if not task_id or not isinstance(task_id, str):
-            raise ValueError("[ERROR] Task 'id' field is required and must be a string")
-
-        # Validate match_mode
-        match_mode = data.get("matchMode", "all")
-        valid_modes = ("first", "all", "unique_per_var")
-        if match_mode not in valid_modes:
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' has invalid matchMode '{match_mode}'. "
-                f"Valid options: {', '.join(valid_modes)}"
-            )
-
-        # Validate max_match
-        max_match = data.get("maxMatch", 0)
-        if not isinstance(max_match, int) or max_match < 0:
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' has invalid maxMatch '{max_match}'. "
-                f"Must be a non-negative integer (0 = unlimited)"
-            )
+        # Resolve capture signals with scope and parse into Signal/PatternSignal objects
+        capture_signals = []
+        for sig in raw_capture:
+            resolved_sig = resolve_signal_path(sig, final_scope)
+            # Check if signal is a pattern (contains {var})
+            if re.search(r"\{\w+\}", resolved_sig):
+                # Create PatternSignal for pattern templates
+                capture_signals.append(
+                    PatternSignal(template=resolved_sig, scope=final_scope)
+                )
+            else:
+                # Create one regular Signal for non-pattern signals
+                capture_signals.append(Signal(raw_name=resolved_sig, scope=final_scope))
 
         return cls(
-            id=task_id,
+            id=data.get("id", ""),
             raw_condition=raw_condition,
-            capture=capture,
-            has_dep_in_condition=has_dep,
-            has_pattern_in_capture=has_pattern,
+            capture=capture_signals,
             name=data.get("name"),
             scope=final_scope,
             deps=data.get("dependsOn", []),
             logging=data.get("logging"),
-            match_mode=match_mode,
-            max_match=max_match,
+            match_mode=data.get("matchMode", "all"),
+            max_match=data.get("maxMatch", 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert Task to dictionary"""
+        # Extract raw signal names from capture_signals for serialization
+        capture_list = []
+        for sig in self.capture:
+            if sig.is_pattern():
+                capture_list.append(sig.get_template())
+            else:
+                capture_list.append(sig.raw_name)
+
         result: Dict[str, Any] = {
-            "capture": self.capture,
+            "id": self.id,
+            "capture": capture_list,
             "dependsOn": self.deps,
             "condition": self.raw_condition,
         }
-        if self.id:
-            result["id"] = self.id
         if self.name:
             result["name"] = self.name
         if self.scope:
@@ -99,17 +98,22 @@ class Task:
 
 
 class YamlBuilder:
-    """YAML configuration loader and validator"""
+    """YAML configuration loader and resolver"""
+
+    config: Dict[str, Any]
+
+    _fsdb_builder: FsdbBuilder
 
     def __init__(self) -> None:
-        self.line_map: Dict[str, int] = {}
-        self.config: Optional[Dict[str, Any]] = None
         self.output_dir: Optional[Path] = None
+
+        self._validator = YamlValidator()
+        self._cond_builder = ConditionBuilder()
         self._tasks_resolved: bool = False
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration with validation"""
-        self._extract_line_numbers(config_path)
+        self._validator.extract_line_numbers(config_path)
 
         try:
             with open(config_path, "r") as f:
@@ -123,324 +127,292 @@ class YamlBuilder:
                     line_info = f" at line {line + 1}"
             raise ValueError(f"[ERROR] YAML syntax error{line_info}: {e}")
 
-        self._validate_config(config, config_path)
+        self._validator.validate_config(config)
+        self.output_dir = Path(config["output"]["directory"])
+        self.config = config
+
+        # Extract FSDB parameters and create builder
+        fsdb_file = Path(config["fsdbFile"])
+        output_dir = Path(config["output"]["directory"])
+        verbose = config["output"]["verbose"]
+
+        # Create output directory if needed
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize FSDB builder
+        self._fsdb_builder = FsdbBuilder(fsdb_file, output_dir, verbose)
+
         return config
 
-    def _validate_config(self, config: Dict[str, Any], config_path: str) -> None:
-        """Validate configuration structure"""
-        if "fsdbFile" not in config:
-            line_info = self._get_line_info("fsdbFile")
-            raise ValueError(f"[ERROR] Missing required field 'fsdbFile' {line_info}")
+    @property
+    def timestamps(self) -> List[int]:
+        """Get FSDB timestamps (in 100fs units)
 
-        fsdb_path = Path(config["fsdbFile"])
-        if not fsdb_path.exists():
-            raise FileNotFoundError(f"[ERROR] FSDB file not found: {fsdb_path}")
+        Returns:
+            List of timestamps from FSDB
 
-        if not str(fsdb_path).endswith(".fsdb"):
-            print(f"[WARN] Target FSDB file extension is not .fsdb: {fsdb_path}")
-
-        if "tasks" not in config or not config["tasks"]:
-            line_info = self._get_line_info("tasks")
-            raise ValueError(
-                f"[ERROR] Missing 'tasks' field or task list is empty {line_info}"
-            )
-
-        config.setdefault("globalClock", "clk")
-        config.setdefault("scope", "")
-
-        # Validate globalFlush configuration (optional)
-        if "globalFlush" in config:
-            flush_config = config["globalFlush"]
-            if not isinstance(flush_config, dict):
-                raise ValueError("[ERROR] globalFlush must be a dict")
-
-            if "condition" not in flush_config:
-                raise ValueError("[ERROR] globalFlush.condition is required")
-
-            if not isinstance(flush_config["condition"], list):
-                raise ValueError("[ERROR] globalFlush.condition must be a list")
-
-        if "output" not in config:
-            config["output"] = {}
-        config["output"].setdefault("directory", "temp_reports")
-        config["output"].setdefault("verbose", False)
-        config["output"].setdefault("dependency_graph", "deps.png")
-        config["output"].setdefault("timeout", 100)  # Default 100 time units
-
-        # Validate timeout
-        if not isinstance(config["output"]["timeout"], int) or config["output"]["timeout"] <= 0:
-            raise ValueError("[ERROR] output.timeout must be a positive integer")
-
-        self.output_dir = Path(config["output"]["directory"])
-        try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
+        Raises:
+            RuntimeError: If called before signals are dumped
+        """
+        if not self._fsdb_builder or not self._fsdb_builder.timestamps:
             raise RuntimeError(
-                f"[ERROR] Failed to create output directory {self.output_dir}: {e}"
+                "[ERROR] Timestamps not available. Call resolve_config() with dump_signals=True first."
             )
+        return self._fsdb_builder.timestamps
 
-        for idx, task in enumerate(config["tasks"], 1):
-            self._validate_task(task, idx)
-            # Normalize condition to single string
-            if "condition" in task:
-                task["condition"] = self._normalize_condition(task["condition"])
-            # Normalize logging to single string
-            if "logging" in task:
-                task["logging"] = self._normalize_logging(task["logging"])
-            # Normalize dependsOn to list
-            if "dependsOn" in task:
-                depends = task["dependsOn"]
-                if isinstance(depends, str):
-                    task["dependsOn"] = [depends]
+    @property
+    def fsdb_file(self) -> Path:
+        """Get FSDB file path
 
-        self._validate_dependencies(config["tasks"])
-        self.config = config
+        Returns:
+            Path to FSDB file
 
-    def resolve_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve config by converting dict tasks to Task objects"""
-        self.config = config
+        Raises:
+            RuntimeError: If called before load_config()
+        """
+        return self._fsdb_builder.fsdb_file
 
-        # Convert dict tasks to Task objects
+    def resolve_config(
+        self, dump_signals: bool = True
+    ) -> Tuple[Dict[str, Any], Optional[Condition]]:
+        """Resolve config by converting dict tasks to Task objects and building conditions
+
+        Args:
+            dump_signals: If True, collect SOI and dump signals from FSDB (default: True)
+                         Set to False for deps-only mode
+
+        Returns:
+            Tuple of (resolved config dictionary, globalFlush condition if exists)
+        """
+        config = self.config
         global_scope = config.get("scope", "")
+
+        # Phase 1: Convert dict tasks to Task objects and build Conditions
+        # Pattern conditions are built but not activated yet (no FSDB dependency)
         task_objects: List[Task] = []
         for task_dict in config.get("tasks", []):
-            task_obj = Task.from_dict(task_dict, global_scope, self)
+            task_obj = Task.from_dict(task_dict, global_scope)
+            # Build Condition immediately (pattern conditions need activation later)
+            task_obj.condition = self._cond_builder.build_raw(
+                task_obj.raw_condition, task_obj.scope or global_scope
+            )
             task_objects.append(task_obj)
 
         config["tasks"] = task_objects
         self._tasks_resolved = True
 
-        return config
+        # Build globalFlush condition early (before dump_signals)
+        # This allows collect_raw_signals to use gflush_condition.signals
+        gflush_condition: Optional[Condition] = None
+        if "globalFlush" in config:
+            flush_config = config["globalFlush"]
+            gflush_condition = self._cond_builder.build_raw(
+                raw_condition=flush_config["condition"], scope=global_scope
+            )
 
-    def collect_raw_signals(self, global_scope: str) -> List[str]:
+        # Phase 2: Dump signals and activate pattern conditions
+        if dump_signals and self._fsdb_builder:
+            soi = self.collect_raw_signals(global_scope, gflush_condition)
+            self._fsdb_builder.dump_signals(soi)
+
+            # Resolve capture templates to Signal objects (Stage 3)
+            self.resolve_capture_signals()
+
+            # Resolve condition signals to Signal objects (Stage 3)
+            self.resolve_condition_signals(gflush_condition)
+
+            # Activate pattern conditions with candidates resolved in Stage 3
+            for task in task_objects:
+                if task.condition and task.condition.has_pattern:
+                    candidates = set()
+                    for sig in task.condition.signals:
+                        if sig.is_pattern():
+                            candidates.update(sig.candidates)
+                    task.condition.activate(list(candidates))
+
+            # Activate globalFlush condition if it's a pattern condition
+            if gflush_condition and gflush_condition.has_pattern:
+                candidates = set()
+                for sig in gflush_condition.signals:
+                    if sig.is_pattern():
+                        candidates.update(sig.candidates)
+                gflush_condition.activate(list(candidates))
+
+        return config, gflush_condition
+
+    def collect_raw_signals(
+        self, global_scope: str, gflush_condition: Optional[Condition] = None
+    ) -> List[str]:
         """Collect all raw signals-of-interest from all tasks (capture + condition)
 
         Signals may contain wildcard patterns like {*} which will be expanded by fsdb_builder.
 
         Args:
             global_scope: Global scope for signal resolution
+            gflush_condition: Pre-built globalFlush Condition object (optional)
 
         Returns:
             List of all raw signals (may contain {*} patterns)
+
+        Note:
+            Must be called after Task.condition is built (after resolve_config Phase 1)
         """
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
-
-        from condition_builder import ConditionBuilder
 
         all_signals: Set[str] = set()
         tasks: List[Union[Dict[str, Any], Task]] = self.config.get("tasks", [])
 
         for task in tasks:
             if isinstance(task, Task):
-                # Collect capture signals
+                # Collect capture signals from Signal/PatternSignal objects
                 for sig in task.capture:
-                    if isinstance(sig, str):
-                        normalized_sig = re.sub(r'\{[^}]+\}', '{*}', sig)
-                        all_signals.add(normalized_sig)
+                    if sig.is_pattern():
+                        # PatternSignal: use wildcard_pattern
+                        all_signals.add(sig.wildcard_pattern)
+                    else:
+                        # Regular Signal: use raw_name
+                        all_signals.add(sig.raw_name)
 
-                # Collect condition signals using ConditionBuilder
-                if task.raw_condition:
-                    condition_str = task.raw_condition.replace("&&", " and ").replace("||", " or ")
-                    condition_str = re.sub(r'\s+', ' ', condition_str).strip()
-                    cond_signals = ConditionBuilder.collect_signals(condition_str, task.scope or "")
-                    all_signals.update(cond_signals)
+                # Collect condition signals from built Condition object
+                if task.condition:
+                    for sig_obj in task.condition.signals:
+                        if sig_obj.is_pattern():
+                            # PatternSignal: use wildcard_pattern
+                            all_signals.add(sig_obj.wildcard_pattern)
+                        else:
+                            # Regular Signal: use raw_name
+                            all_signals.add(sig_obj.raw_name)
             else:
-                raise RuntimeError("Tasks must be resolved to Task objects before collecting signals")
+                raise RuntimeError(
+                    "Tasks must be resolved to Task objects before collecting signals"
+                )
 
-        # Collect globalFlush condition signals
-        if "globalFlush" in self.config:
-            flush_condition = self._normalize_condition(self.config["globalFlush"]["condition"])
-            flush_signals = ConditionBuilder.collect_signals(
-                flush_condition,
-                self.config.get("scope", "")
-            )
-            all_signals.update(flush_signals)
+        # Collect globalFlush condition signals from pre-built Condition object
+        if gflush_condition:
+            for sig_obj in gflush_condition.signals:
+                if sig_obj.is_pattern():
+                    # PatternSignal: use wildcard_pattern
+                    all_signals.add(sig_obj.wildcard_pattern)
+                else:
+                    # Regular Signal: use raw_name
+                    all_signals.add(sig_obj.raw_name)
 
         return list(all_signals)
 
-    def _resolve_signal_path(self, signal: str, scope: str) -> str:
-        """Resolve signal path with scope support (delegates to utils)"""
-        return resolve_signal_path(signal, scope)
+    def resolve_capture_signals(self) -> None:
+        """Resolve capture Signal objects and populate with FSDB waveform data"""
+        if not self._fsdb_builder or not self._fsdb_builder._signals:
+            raise RuntimeError("Cannot resolve capture signals before FSDB dump")
 
-    def _normalize_condition(self, condition: Union[str, List[str]]) -> str:
-        """Normalize condition to single Python expression string"""
-        if isinstance(condition, str):
-            return condition.strip()
-        elif isinstance(condition, list):
-            return " ".join(line.strip() for line in condition if line.strip())
-        return str(condition)
+        tasks: List[Task] = self.config.get("tasks", [])
 
-    def _normalize_logging(self, logging: Union[str, List[str]]) -> str:
-        """Normalize logging to single format string"""
-        if isinstance(logging, str):
-            return logging.strip()
-        elif isinstance(logging, list):
-            return " ".join(line.strip() for line in logging if line.strip())
-        return str(logging)
+        for task in tasks:
+            resolved_capture = self._resolve_signal_list(
+                task.capture, context_info=f"task '{task.id}'"
+            )
+            # Update task signal_map with all resolved Signal objects
+            task.signal_map = {Signal.normalize(s.raw_name): s for s in resolved_capture}
 
-    def _validate_task(self, task: Dict[str, Any], task_num: int) -> None:
-        """Validate task configuration"""
-        line_info = self._get_line_info(f"tasks[{task_num - 1}]")
+    def resolve_condition_signals(
+        self, gflush_condition: Optional[Condition] = None
+    ) -> None:
+        """Resolve condition Signal objects and populate with FSDB waveform data"""
+        if not self._fsdb_builder or not self._fsdb_builder._signals:
+            raise RuntimeError("Cannot resolve condition signals before FSDB dump")
 
-        def require_nonempty(value: Any, field_name: str) -> None:
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"[ERROR] Task {task_num} '{field_name}' must be non-empty string{line_info}"
+        tasks: List[Task] = self.config.get("tasks", [])
+
+        # Resolve condition signals for all tasks
+        for task in tasks:
+            if task.condition:
+                resolved_signals = self._resolve_signal_list(
+                    task.condition.signals, context_info=f"task '{task.id}' condition"
+                )
+                task.condition.signal_map = {
+                    Signal.normalize(s.raw_name): s for s in resolved_signals
+                }
+
+        # Resolve globalFlush condition if provided
+        if gflush_condition:
+            resolved_signals = self._resolve_signal_list(
+                gflush_condition.signals, context_info="globalFlush condition"
+            )
+            gflush_condition.signal_map = {
+                Signal.normalize(s.raw_name): s for s in resolved_signals
+            }
+
+    def _resolve_signal_list(
+        self, signals: List[Union[Signal, PatternSignal]], context_info: str = ""
+    ) -> List[Signal]:
+        """Unified logic to resolve Signal and PatternSignal objects from FSDB cache.
+
+        Populates waveform data for Signal objects and candidates for PatternSignal objects.
+        Returns a flat list of all resolved Signal objects (including expanded pattern signals).
+        """
+        resolved_list: List[Signal] = []
+        for sig in signals:
+            if sig.is_pattern():
+                # PatternSignal handling
+                pattern_sig = sig
+                expanded_names = self._fsdb_builder.expand_pattern(
+                    [pattern_sig.wildcard_pattern]
                 )
 
-        # id is required
-        if "id" not in task:
-            raise ValueError(
-                f"[ERROR] Task {task_num} missing required field 'id'{line_info}"
-            )
+                candidates = set()
+                pattern_resolved_signals = []
 
-        task_id = task["id"]
-        require_nonempty(task_id, "id")
-        if not task_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(
-                f"[ERROR] Task '{task_id}' id contains invalid characters{line_info}"
-            )
+                for sig_name in expanded_names:
+                    # Extract variable value from expanded name
+                    template = pattern_sig.template
+                    var_name = pattern_sig.variable_name
 
-        task_identifier = task_id
-
-        if "name" in task:
-            require_nonempty(task["name"], "name")
-
-        if "scope" in task:
-            require_nonempty(task["scope"], "scope")
-
-        if "dependsOn" in task:
-            depends = task["dependsOn"]
-            if isinstance(depends, str):
-                require_nonempty(depends, "dependsOn")
-            elif isinstance(depends, list):
-                if not depends:
-                    raise ValueError(
-                        f"[ERROR] Task '{task_identifier}' 'dependsOn' list cannot be empty{line_info}"
+                    # Create regex pattern from template
+                    regex_pattern = re.escape(template).replace(
+                        re.escape(f"{{{var_name}}}"), r"(\w+)"
                     )
-                for dep_id in depends:
-                    if not isinstance(dep_id, str) or not dep_id.strip():
-                        raise ValueError(
-                            f"[ERROR] Task '{task_identifier}' 'dependsOn' contains invalid dependency{line_info}"
-                        )
+
+                    match = re.match(regex_pattern, sig_name)
+                    if match:
+                        candidates.add(match.group(1))
+
+                        # Look up Signal object from cache
+                        normalized = Signal.normalize(sig_name)
+                        if normalized in self._fsdb_builder._signals:
+                            cached_sig = self._fsdb_builder._signals[normalized]
+                            pattern_resolved_signals.append(cached_sig)
+                            if cached_sig not in resolved_list:
+                                resolved_list.append(cached_sig)
+
+                # Populate PatternSignal with candidates and resolved signals
+                pattern_sig.set_candidates(
+                    candidate_values=list(candidates),
+                    signal_objects=pattern_resolved_signals,
+                )
             else:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' 'dependsOn' must be string or list{line_info}"
-                )
-
-        if "condition" not in task:
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' missing 'condition' field{line_info}"
-            )
-
-        condition = task["condition"]
-        if isinstance(condition, str):
-            require_nonempty(condition, "condition")
-        elif isinstance(condition, list):
-            if not condition:
-                raise ValueError(
-                    f"[ERROR] Task '{task_identifier}' 'condition' list cannot be empty{line_info}"
-                )
-            for line in condition:
-                if not isinstance(line, str) or not line.strip():
-                    raise ValueError(
-                        f"[ERROR] Task '{task_identifier}' 'condition' contains invalid line{line_info}"
+                # Regular Signal handling
+                normalized = Signal.normalize(sig.raw_name)
+                if normalized in self._fsdb_builder._signals:
+                    cached_sig = self._fsdb_builder._signals[normalized]
+                    # Populate waveform data into the existing Signal object
+                    sig.vidcode = cached_sig.vidcode
+                    sig.values = cached_sig.values
+                    sig.msb = cached_sig.msb
+                    sig.lsb = cached_sig.lsb
+                    resolved_list.append(sig)
+                else:
+                    print(
+                        f"[WARN] Signal '{normalized}' not found in FSDB cache for {context_info}"
                     )
-        else:
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' 'condition' must be string or list of strings{line_info}"
-            )
+        return resolved_list
 
-        capture = task.get("capture", [])
-        if not capture:
-            print(
-                f"[WARN] Task '{task_identifier}' has no signals specified in 'capture' field{line_info}"
-            )
-        elif not isinstance(capture, list):
-            raise ValueError(
-                f"[ERROR] Task '{task_identifier}' 'capture' field must be a list{line_info}"
-            )
-        else:
-            for idx, sig in enumerate(capture):
-                if isinstance(sig, str):
-                    if not sig or sig.isspace():
-                        raise ValueError(
-                            f"[ERROR] Task '{task_identifier}' capture[{idx}] signal is empty{line_info}"
-                        )
 
-    def _validate_dependencies(self, tasks: List[Dict[str, Any]]) -> None:
-        """Validate task dependency graph and detect cycles"""
-        task_map: Dict[str, int] = {}
-        for idx, task in enumerate(tasks):
-            task_id = task.get("id")
-            if not task_id:
-                continue
-            if task_id in task_map:
-                raise ValueError(f"[ERROR] Duplicate task id '{task_id}' found")
-            task_map[task_id] = idx
-
-        for idx, task in enumerate(tasks):
-            task_display_name = task.get("name") or task.get("id") or f"Task {idx + 1}"
-            for dep_id in task.get("dependsOn", []):
-                if dep_id not in task_map:
-                    raise ValueError(
-                        f"[ERROR] Task '{task_display_name}' depends on non-existent task '{dep_id}'"
-                    )
-
-        visited: Set[int] = set()
-        rec_stack: Set[int] = set()
-
-        def has_cycle(task_idx: int, path: List[str]) -> bool:
-            visited.add(task_idx)
-            rec_stack.add(task_idx)
-            path.append(tasks[task_idx].get("id", f"task_{task_idx}"))
-
-            for dep_id in tasks[task_idx].get("dependsOn", []):
-                dep_idx = task_map[dep_id]
-                if dep_idx not in visited:
-                    if has_cycle(dep_idx, path):
-                        return True
-                elif dep_idx in rec_stack:
-                    cycle_start = path.index(dep_id)
-                    cycle = " -> ".join(path[cycle_start:] + [dep_id])
-                    raise ValueError(f"[ERROR] Circular dependency detected: {cycle}")
-
-            path.pop()
-            rec_stack.remove(task_idx)
-            return False
-
-        for idx in range(len(tasks)):
-            if idx not in visited:
-                has_cycle(idx, [])
-
-    def _extract_line_numbers(self, config_path: str) -> None:
-        """Extract line numbers for all keys in YAML file"""
-        try:
-            with open(config_path, "r") as f:
-                lines = f.readlines()
-
-            for line_num, line in enumerate(lines, 1):
-                stripped = line.lstrip()
-                if stripped and not stripped.startswith("#") and ":" in stripped:
-                    key = stripped.split(":")[0].strip()
-                    if key.startswith("- "):
-                        continue
-                    self.line_map[key] = line_num
-        except Exception:
-            pass
-
-    def _get_line_info(self, key_path: str) -> str:
-        """Get line information for error messages"""
-        parts = key_path.replace("[", ".").replace("]", "").split(".")
-
-        for part in reversed(parts):
-            if part.isdigit():
-                continue
-            if part in self.line_map:
-                return f" (line {self.line_map[part]})"
-
-        return ""
+    def _normalize(self, value: Union[str, List[str]]) -> str:
+        """Normalize string or list of strings to single space-joined string"""
+        if isinstance(value, str):
+            return value.strip()
+        elif isinstance(value, list):
+            return " ".join(line.strip() for line in value if line.strip())
 
     def build_exec_order(self) -> List[int]:
         """Build topologically sorted task execution order and export dependency graph"""
@@ -498,7 +470,6 @@ class YamlBuilder:
         if not self.config:
             raise RuntimeError("Config not loaded. Call load_config first.")
 
-        # Pure-Python NetworkX + Matplotlib implementation (no system 'dot' needed)
         self._export_deps_graph_matplotlib(output_path, task_execution_order)
 
     def _export_deps_graph_matplotlib(
@@ -509,6 +480,7 @@ class YamlBuilder:
         Produces PNG/PDF/SVG without requiring Graphviz 'dot'."""
         try:
             import matplotlib
+
             matplotlib.use("Agg")  # Headless backend for servers/CI
             import matplotlib.pyplot as plt
             import networkx as nx
@@ -571,7 +543,9 @@ class YamlBuilder:
                 pos[node] = (lvl * x_spacing, -idx * y_spacing)
 
         # Draw nodes and edges
-        fig, ax = plt.subplots(figsize=(max(6, len(G.nodes) * 0.8), max(4, len(G.nodes) * 0.6)))
+        fig, ax = plt.subplots(
+            figsize=(max(6, len(G.nodes) * 0.8), max(4, len(G.nodes) * 0.6))
+        )
         nx.draw_networkx_nodes(
             G,
             pos,
@@ -580,7 +554,9 @@ class YamlBuilder:
             node_shape="s",
             ax=ax,
         )
-        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="-|>", arrowsize=16, width=1.8, ax=ax)
+        nx.draw_networkx_edges(
+            G, pos, arrows=True, arrowstyle="-|>", arrowsize=16, width=1.8, ax=ax
+        )
 
         # Labels
         labels = {n: G.nodes[n].get("label", n) for n in G.nodes}
@@ -620,44 +596,103 @@ class YamlBuilder:
 
         Returns:
             Formatted log message string
+
+        Supports format specifiers for base conversion:
+            {signal:x} - hex format (lowercase)
+            {signal:X} - hex format (uppercase)
+            {signal:b} - binary format
+            {signal:d} - decimal format
+            {signal:o} - octal format
+
+        Signal names in log format can use full paths with dots and brackets:
+            {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]}
+            {x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]:x}
         """
+        from .base import Signal
+
         context: Dict[str, Any] = {"__time__": row_idx}
+
+        # Find all placeholders with format specifiers in the log format
+        # Pattern matches {name} or {name:spec} where name can include [msb:lsb] bit ranges
+        # Pattern explanation:
+        # - Signal ref can contain: normal chars, dots, or [msb:lsb] bit ranges
+        # - Format spec is optional :x/:X/:b/:d/:o at the end
+        placeholder_pattern = re.compile(
+            r"\{((?:[^}:\[\]]+|\[\d+:\d+\])+)(?::([xXbdo]))?\}"
+        )
+
+        # Collect all signal references from log_format and their format specs
+        # Key: normalized signal name (last component without bit range)
+        # Value: (original_ref, needs_int_conversion)
+        signal_refs: Dict[str, Tuple[str, bool]] = {}
+
+        for match in placeholder_pattern.finditer(log_format):
+            signal_ref = match.group(1)
+            format_spec = match.group(2)
+
+            if signal_ref == "__time__":
+                continue
+
+            # Get the last component and normalize it
+            last_component = signal_ref.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+            needs_int = format_spec in ("x", "X", "b", "d", "o")
+
+            # If same signal appears with different format specs, prefer int conversion
+            if normalized in signal_refs:
+                _, existing_needs_int = signal_refs[normalized]
+                needs_int = needs_int or existing_needs_int
+
+            signal_refs[normalized] = (signal_ref, needs_int)
+
+        # Build context using normalized signal names
         for sig in capture_signals:
-            sig_name = sig.split(".")[-1].split("/")[-1]
+            last_component = sig.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+
             val_str = row_data["capd"].get(sig, "0")
+
+            # Handle undefined values
             if val_str in ["x", "z", "X", "Z"] or val_str.startswith("*"):
-                context[sig_name] = "0x0"
+                val_str = "0"
+
+            # Check if this signal needs int conversion
+            needs_int = signal_refs.get(normalized, (None, False))[1]
+
+            if needs_int:
+                # Parse hex string to integer
+                if val_str.startswith("0x") or val_str.startswith("0X"):
+                    context[normalized] = int(val_str, 16)
+                else:
+                    context[normalized] = int(val_str, 16) if val_str else 0
             else:
+                # Keep as string with 0x prefix for default display
                 if not val_str.startswith("0x") and not val_str.startswith("0X"):
                     val_str = "0x" + val_str
-                context[sig_name] = val_str
+                context[normalized] = val_str
+
+        # Replace signal references in log_format with normalized names
+        def replace_placeholder(match: re.Match) -> str:
+            signal_ref = match.group(1)
+            format_spec = match.group(2)
+
+            if signal_ref == "__time__":
+                return match.group(0)
+
+            last_component = signal_ref.split(".")[-1].split("/")[-1]
+            normalized = Signal.normalize(last_component)
+
+            if format_spec:
+                return "{" + normalized + ":" + format_spec + "}"
+            else:
+                return "{" + normalized + "}"
+
+        safe_log_format = placeholder_pattern.sub(replace_placeholder, log_format)
 
         try:
-            return eval(f'f"""{log_format}"""', {}, context)
+            return eval(f'f"""{safe_log_format}"""', {}, context)
         except Exception as e:
             return f"[LOG ERROR] Failed to format log: {e}"
-
-    def resolve_capture_signals(
-        self, capture_signals: List[Any], scope: str
-    ) -> List[str]:
-        """Resolve capture signal paths with scope support
-
-        Args:
-            capture_signals: List of signal names to capture
-            scope: Resolved scope for this task
-
-        Returns:
-            List of resolved signal paths (patterns preserved)
-        """
-        resolved_signals: List[str] = []
-        for sig in capture_signals:
-            if isinstance(sig, str):
-                # Always resolve with scope, even if it contains {var} pattern
-                resolved_sig = self._resolve_signal_path(sig, scope)
-                resolved_signals.append(resolved_sig)
-            else:
-                resolved_signals.append(str(sig))
-        return resolved_signals
 
     def resolve_dep_references(
         self, value: Any, task_id: str, task_data: Dict[str, Any]

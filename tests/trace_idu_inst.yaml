@@ -1,0 +1,322 @@
+# =============================================================================
+# IDU Instruction Lifecycle Tracker
+# =============================================================================
+# 目标：追踪单条指令从 IFU 进入 IDU → ID(译码) → IR(rename) → IS(发射) → 队列落地
+# 关键标识：inst[31:0] 与 IID 贯穿三大 Stage
+# =============================================================================
+
+fsdbFile: /home/c910/lingzichao/openc910/smart_run/work_force/novas.fsdb
+globalClock: tb.clk
+scope: tb.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core
+
+output:
+  directory: idu_inst_reports
+  verbose: true
+  timeout: 10000000
+
+globalFlush:
+  condition:
+    - "x_ct_idu_top.rtu_idu_flush_fe == 1'b1"
+    - "|| x_ct_idu_top.rtu_idu_flush_is == 1'b1"
+    - "|| x_ct_idu_top.rtu_yy_xx_flush == 1'b1"
+
+# =============================================================================
+# Stage 0: IFU → IDU Interface (Trigger)
+# =============================================================================
+# 每个 IFU IB inst{0/1/2} 作为独立 trace 起点
+# =============================================================================
+
+tasks:
+  - id: ifu_to_idu_inst0
+    name: "IFU→IDU Inst0 (Trigger)"
+    condition:
+      - "x_ct_ifu_top.ifu_idu_ib_inst0_vld == 1'b1"
+      - "&& x_ct_idu_top.idu_ifu_id_stall == 1'b0"
+    capture:
+      - x_ct_ifu_top.ifu_idu_ib_inst0_vld
+      - x_ct_idu_top.idu_ifu_id_stall
+      - x_ct_ifu_top.ifu_idu_ib_inst0_data
+    logging:
+      - "[IFU->IDU0] data={x_ct_ifu_top.ifu_idu_ib_inst0_data[31:0]}"
+
+  - id: ifu_to_idu_inst1
+    name: "IFU→IDU Inst1 (Trigger)"
+    condition:
+      - "x_ct_ifu_top.ifu_idu_ib_inst1_vld == 1'b1"
+      - "&& x_ct_idu_top.idu_ifu_id_stall == 1'b0"
+    capture:
+      - x_ct_ifu_top.ifu_idu_ib_inst1_vld
+      - x_ct_idu_top.idu_ifu_id_stall
+      - x_ct_ifu_top.ifu_idu_ib_inst1_data
+    logging:
+      - "[IFU->IDU1] data={x_ct_ifu_top.ifu_idu_ib_inst1_data[31:0]}"
+
+  - id: ifu_to_idu_inst2
+    name: "IFU→IDU Inst2 (Trigger)"
+    condition:
+      - "x_ct_ifu_top.ifu_idu_ib_inst2_vld == 1'b1"
+      - "&& x_ct_idu_top.idu_ifu_id_stall == 1'b0"
+    capture:
+      - x_ct_ifu_top.ifu_idu_ib_inst2_vld
+      - x_ct_idu_top.idu_ifu_id_stall
+      - x_ct_ifu_top.ifu_idu_ib_inst2_data
+    logging:
+      - "[IFU->IDU2] data={x_ct_ifu_top.ifu_idu_ib_inst2_data[31:0]}"
+
+  # =============================================================================
+  # Stage 1: ID Stage - Instruction Decode (入口)
+  # =============================================================================
+  - id: idu_id_pipe0
+    name: "IDU ID Pipe0"
+    dependsOn: ifu_to_idu_inst0
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_id_dp.id_inst0_data[31:0] == $dep.ifu_to_idu_inst0.ifu_idu_ib_inst0_data[31:0]"
+    capture:
+      - x_ct_idu_top.x_ct_idu_id_dp.id_inst0_data
+      - x_ct_idu_top.idu_iu_rf_pipe0_iid
+    logging:
+      - "[ID0] iid={x_ct_idu_top.idu_iu_rf_pipe0_iid} inst={x_ct_idu_top.x_ct_idu_id_dp.id_inst0_data[31:0]}"
+
+  - id: idu_id_pipe1
+    name: "IDU ID Pipe1"
+    dependsOn: ifu_to_idu_inst1
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_id_dp.id_inst1_data[31:0] == $dep.ifu_to_idu_inst1.ifu_idu_ib_inst1_data[31:0]"
+    capture:
+      - x_ct_idu_top.x_ct_idu_id_dp.id_inst1_data
+      - x_ct_idu_top.idu_iu_rf_pipe1_iid
+    logging:
+      - "[ID1] iid={x_ct_idu_top.idu_iu_rf_pipe1_iid} inst={x_ct_idu_top.x_ct_idu_id_dp.id_inst1_data[31:0]}"
+
+  - id: idu_id_pipe2
+    name: "IDU ID Pipe2"
+    dependsOn: ifu_to_idu_inst2
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_id_dp.id_inst2_data[31:0] == $dep.ifu_to_idu_inst2.ifu_idu_ib_inst2_data[31:0]"
+    capture:
+      - x_ct_idu_top.x_ct_idu_id_dp.id_inst2_data
+      - x_ct_idu_top.idu_iu_rf_pipe2_iid
+    logging:
+      - "[ID2] iid={x_ct_idu_top.idu_iu_rf_pipe2_iid} inst={x_ct_idu_top.x_ct_idu_id_dp.id_inst2_data[31:0]}"
+
+  # =============================================================================
+  # Stage 2: IR Stage - Instruction Rename (入口)
+  # =============================================================================
+  - id: idu_ir_pipe0
+    name: "IDU IR Pipe0 (Rename)"
+    dependsOn: idu_id_pipe0
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_ir_ctrl.ctrl_ir_pipedown_inst0_vld == 1'b1"
+      - "&& x_ct_idu_top.x_ct_idu_ir_dp.ir_inst0_data[31:0] == $dep.idu_id_pipe0.id_inst0_data[31:0]"
+      - "&& (x_ct_idu_top.idu_rtu_ir_preg0_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_freg0_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_vreg0_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_ereg0_alloc_vld == 1'b1)"
+    capture:
+      - x_ct_idu_top.x_ct_idu_ir_dp.ir_inst0_data
+      - rtu_idu_rob_inst0_iid
+      - rtu_idu_rob_inst1_iid
+      - rtu_idu_rob_inst2_iid
+      - rtu_idu_rob_inst3_iid
+      - x_ct_idu_top.idu_rtu_ir_preg0_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_freg0_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_vreg0_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_ereg0_alloc_vld
+    logging:
+      - "[IR0] inst={x_ct_idu_top.x_ct_idu_ir_dp.ir_inst0_data[31:0]} preg={x_ct_idu_top.idu_rtu_ir_preg0_alloc_vld} freg={x_ct_idu_top.idu_rtu_ir_freg0_alloc_vld} vreg={x_ct_idu_top.idu_rtu_ir_vreg0_alloc_vld} ereg={x_ct_idu_top.idu_rtu_ir_ereg0_alloc_vld}"
+
+  - id: idu_ir_pipe1
+    name: "IDU IR Pipe1 (Rename)"
+    dependsOn: idu_id_pipe1
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_ir_ctrl.ctrl_ir_pipedown_inst1_vld == 1'b1"
+      - "&& x_ct_idu_top.x_ct_idu_ir_dp.ir_inst1_data[31:0] == $dep.idu_id_pipe1.id_inst1_data[31:0]"
+      - "&& (x_ct_idu_top.idu_rtu_ir_preg1_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_freg1_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_vreg1_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_ereg1_alloc_vld == 1'b1)"
+    capture:
+      - x_ct_idu_top.x_ct_idu_ir_dp.ir_inst1_data
+      - rtu_idu_rob_inst0_iid
+      - rtu_idu_rob_inst1_iid
+      - rtu_idu_rob_inst2_iid
+      - rtu_idu_rob_inst3_iid
+      - x_ct_idu_top.idu_rtu_ir_preg1_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_freg1_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_vreg1_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_ereg1_alloc_vld
+    logging:
+      - "[IR1] inst={x_ct_idu_top.x_ct_idu_ir_dp.ir_inst1_data[31:0]} preg={x_ct_idu_top.idu_rtu_ir_preg1_alloc_vld} freg={x_ct_idu_top.idu_rtu_ir_freg1_alloc_vld} vreg={x_ct_idu_top.idu_rtu_ir_vreg1_alloc_vld} ereg={x_ct_idu_top.idu_rtu_ir_ereg1_alloc_vld}"
+
+  - id: idu_ir_pipe2
+    name: "IDU IR Pipe2 (Rename)"
+    dependsOn: idu_id_pipe2
+    matchMode: first
+    condition:
+      - "x_ct_idu_top.x_ct_idu_ir_ctrl.ctrl_ir_pipedown_inst2_vld == 1'b1"
+      - "&& x_ct_idu_top.x_ct_idu_ir_dp.ir_inst2_data[31:0] == $dep.idu_id_pipe2.id_inst2_data[31:0]"
+      - "&& (x_ct_idu_top.idu_rtu_ir_preg2_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_freg2_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_vreg2_alloc_vld == 1'b1"
+      - "|| x_ct_idu_top.idu_rtu_ir_ereg2_alloc_vld == 1'b1)"
+    capture:
+      - x_ct_idu_top.x_ct_idu_ir_dp.ir_inst2_data
+      - rtu_idu_rob_inst0_iid
+      - rtu_idu_rob_inst1_iid
+      - rtu_idu_rob_inst2_iid
+      - rtu_idu_rob_inst3_iid
+      - x_ct_idu_top.idu_rtu_ir_preg2_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_freg2_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_vreg2_alloc_vld
+      - x_ct_idu_top.idu_rtu_ir_ereg2_alloc_vld
+    logging:
+      - "[IR2] inst={x_ct_idu_top.x_ct_idu_ir_dp.ir_inst2_data[31:0]} preg={x_ct_idu_top.idu_rtu_ir_preg2_alloc_vld} freg={x_ct_idu_top.idu_rtu_ir_freg2_alloc_vld} vreg={x_ct_idu_top.idu_rtu_ir_vreg2_alloc_vld} ereg={x_ct_idu_top.idu_rtu_ir_ereg2_alloc_vld}"
+
+  # =============================================================================
+  # Stage 3: IS Stage - Issue Selection (出口 → 各队列)
+  # =============================================================================
+  - id: idu_is_dispatch_p0
+    name: "IDU IS Dispatch Pipe0"
+    dependsOn: idu_ir_pipe0
+    matchMode: first
+    condition:
+      - "(x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe0.rtu_idu_rob_inst3_iid))"
+    capture:
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid
+    logging:
+      - "[IS_P0] iid={x_ct_idu_top.idu_iu_rf_pipe0_iid} aiq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en} aiq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en} biq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en} lsiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en} sdiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en} viq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en} viq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en}"
+
+  - id: idu_is_dispatch_p1
+    name: "IDU IS Dispatch Pipe1"
+    dependsOn: idu_ir_pipe1
+    matchMode: first
+    condition:
+      - "(x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe1.rtu_idu_rob_inst3_iid))"
+    capture:
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid
+    logging:
+      - "[IS_P1] iid={x_ct_idu_top.idu_iu_rf_pipe1_iid} aiq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en} aiq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en} biq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en} lsiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en} sdiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en} viq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en} viq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en}"
+
+  - id: idu_is_dispatch_p2
+    name: "IDU IS Dispatch Pipe2"
+    dependsOn: idu_ir_pipe2
+    matchMode: first
+    condition:
+      - "(x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+      - "|| (x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en == 1'b1 && (x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst0_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst1_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst2_iid || x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid == $dep.idu_ir_pipe2.rtu_idu_rob_inst3_iid))"
+    capture:
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_aiq1_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_biq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_lsiq_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create1_en
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq0_create1_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create0_iid
+      - x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create1_en
+      - x_ct_idu_top.x_ct_idu_is_dp.is_viq1_create1_iid
+    logging:
+      - "[IS_P2] iid={x_ct_idu_top.idu_iu_rf_pipe2_iid} aiq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq0_create0_en} aiq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_aiq1_create0_en} biq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_biq_create0_en} lsiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_lsiq_create0_en} sdiq={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_sdiq_create0_en} viq0={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq0_create0_en} viq1={x_ct_idu_top.x_ct_idu_is_ctrl.is_dis_viq1_create0_en}"

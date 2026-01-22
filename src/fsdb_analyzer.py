@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-import argparse
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from yaml_builder import YamlBuilder, Task
-from fsdb_builder import FsdbBuilder
-from condition_builder import ConditionBuilder, Condition
-from utils import resolve_signal_path, normalize_signal_name
+
+from .base import Signal
+from .yaml_builder import YamlBuilder, Task
+from .cond_builder import ConditionBuilder, Condition
 
 
 class FsdbAnalyzer:
@@ -31,25 +29,13 @@ class FsdbAnalyzer:
 
         # Step 2: Extract config parameters
         self.verbose: bool = raw_config["output"]["verbose"]
-        self.timeout: int = raw_config["output"]["timeout"]
-        self.fsdb_file = Path(raw_config["fsdbFile"])
-        self.output_dir = Path(raw_config["output"]["directory"])
+        self.timeout: int  = raw_config["output"]["timeout"]
+        self.clock_signal: str = raw_config["globalClock"]
+        self.global_scope: str = raw_config["scope"]
 
         # Step 3: Initialize ConditionBuilder before resolving config
         self.cond_builder = ConditionBuilder()
 
-        # Step 4: Initialize FsdbBuilder only if not in deps-only mode
-        if not deps_only:
-            self.fsdb_builder = FsdbBuilder(self.fsdb_file, self.output_dir, self.verbose)
-        else:
-            # In deps-only mode, skip FSDB initialization
-            self.fsdb_builder = None
-
-        # Step 5: Resolve config (convert dict tasks to Task objects)
-        self.config: Dict[str, Any] = self.yaml_builder.resolve_config(raw_config)
-
-        self.clock_signal: str = self.config["globalClock"]
-        self.global_scope: str = self.config["scope"]
         self.runtime_data: Dict[str, Any] = {}
 
         # Global flush support (will be compiled after signals are dumped)
@@ -62,6 +48,9 @@ class FsdbAnalyzer:
         # Row duplicate match detection: (task_id, time) -> list of match records
         # Only tracks duplicates within the same task
         self.matched_rows_tracker: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+
+        # Global trace_id counter (shared across all trigger tasks)
+        self.next_trace_id: int = 0
 
     def _check_duplicate_match(
         self,
@@ -137,26 +126,10 @@ class FsdbAnalyzer:
 
         self.trace_lifecycle[trace_id].append(event)
 
-    def _expand_templates(
-        self, templates: List[str], vars: Dict[str, str], scope: str
-    ) -> List[str]:
-        """Expand signal templates with resolved variables after condition evaluation"""
-        signals = []
-        for tmpl in templates:
-            if isinstance(tmpl, str) and "{" in tmpl:
-                sig = tmpl
-                for var_name, var_val in vars.items():
-                    sig = sig.replace(f"{{{var_name}}}", var_val)
-                sig = resolve_signal_path(sig, scope)
-                signals.append(sig)
-            else:
-                signals.append(tmpl)
-        return signals
 
     def _trace_trigger(self, task: Task) -> List[Dict[str, Any]]:
         """Trigger mode: match conditions globally, each match starts new trace"""
-        templates = task.capture
-        print(f"Evaluating condition for {len(templates)} signal(s)")
+        print(f"Evaluating condition for {len(task.capture)} signal(s)")
 
         # Debug mode message
         if self.debug_num > 0:
@@ -166,87 +139,56 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Collect all signals needed (from condition + capture templates)
-        raw_signal_patterns = set()
-
-        # Add condition signals (already normalized with {*} wildcards)
-        raw_signal_patterns.update(cond.signals)
-
-        # Expand capture templates with {*} wildcards
-        for tmpl in templates:
-            if "{" in tmpl:
-                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
-                raw_signal_patterns.add(wildcard)
-            else:
-                raw_signal_patterns.add(tmpl)
-
-        # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
-
-        # Load all signals from FSDB cache (already dumped in run())
-        # Note: Cache uses normalized names (without bit ranges)
-        signal_data = {}
-        for sig in all_signal_names:
-            # Normalize signal name by removing bit range
-            normalized_sig = normalize_signal_name(sig)
-            try:
-                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
-            except RuntimeError:
-                print(f"[WARN] Signal {normalized_sig} not in cache, skipping")
-
-        if not signal_data:
+        if not cond.signal_map:
             print("[WARN] No signals loaded for evaluation")
             return []
 
-        max_len = max(len(vals) for vals in signal_data.values())
+        # Find max_len across all signals in cond.signals
+        max_len = max(len(signal_obj.values) for signal_obj in cond.signals)
 
         # Evaluate condition for each time point
         matched_rows = []
-        trace_id = 0  # Track number of matches
+        local_match_count = 0  # Track matches within this task (for debug_num limit)
 
         for row_idx in range(max_len):
             # Check debug_num limit (0 means unlimited)
-            if self.debug_num > 0 and trace_id >= self.debug_num:
+            if self.debug_num > 0 and local_match_count >= self.debug_num:
                 print(f"[DEBUG] Reached debug limit of {self.debug_num} trigger(s), stopping")
                 break
 
             try:
-                # Build signal_values for this time point
-                signal_values = {}
-                for sig, vals in signal_data.items():
-                    signal_values[sig] = vals[row_idx] if row_idx < len(vals) else '0'
-
                 runtime_data = {
-                    "signal_values": signal_values,
+                    "time": row_idx,
                     "upstream_row": {},
                     "upstream_data": {},
                     "vars": {},
                 }
 
-                if self.cond_builder.exec(cond, runtime_data):
+                if cond.exec(runtime_data):
                     # Condition matched! Extract pattern variables
                     vars = runtime_data.get("vars", {})
 
                     # Expand capture templates with matched variables
-                    signals = self._expand_templates(templates, vars, task.scope or "")
+                    signals = [sig.resolve(vars) for sig in task.capture]
+
+                    # Use global trace_id counter
+                    current_trace_id = self.next_trace_id
 
                     # Build row_data with trace_id, fork_path, and dep_chain
                     row_data = {
                         "time": row_idx,
-                        "trace_id": trace_id,
+                        "trace_id": current_trace_id,
                         "fork_path": [],
                         "capd": {},
                         "dep_chain": {},  # Initialize dep_chain for trigger tasks
                     }
                     for sig in signals:
                         # Normalize signal name to match cache keys
-                        normalized_sig = normalize_signal_name(sig)
-                        if normalized_sig in signal_data:
-                            vals = signal_data[normalized_sig]
+                        normalized_sig = Signal.normalize(sig)
+                        if normalized_sig in task.signal_map:
+                            signal_obj = task.signal_map[normalized_sig]
                             # Use original signal name (with scope) as key in capd
-                            row_data["capd"][sig] = (
-                                vals[row_idx] if row_idx < len(vals) else "0"
-                            )
+                            row_data["capd"][sig] = signal_obj.get_value(row_idx)
                         # Signal not found in signal_data - skip silently
 
                     # Add current task's captured data to dep_chain
@@ -255,12 +197,14 @@ class FsdbAnalyzer:
                     matched_rows.append(row_data)
 
                     # Check for duplicate match
-                    self._check_duplicate_match(row_idx, task, trace_id, row_data["fork_path"])
+                    self._check_duplicate_match(row_idx, task, current_trace_id, row_data["fork_path"])
 
                     # Record trace lifecycle event (trigger starts a new trace)
-                    self._record_trace_event(trace_id, task, row_data, event_type="trigger")
+                    self._record_trace_event(current_trace_id, task, row_data, event_type="trigger")
 
-                    trace_id += 1  # Increment trace_id for each match
+                    # Increment global trace_id counter
+                    self.next_trace_id += 1
+                    local_match_count += 1
 
                     # Log if configured (but don't print immediately - save for trace lifecycle)
                     if task.logging:
@@ -268,8 +212,8 @@ class FsdbAnalyzer:
                             task.logging, row_data, signals, row_idx
                         )
                         # Store log message in trace event
-                        if trace_id - 1 in self.trace_lifecycle:
-                            self.trace_lifecycle[trace_id - 1][-1]["log_msg"] = log_msg
+                        if current_trace_id in self.trace_lifecycle:
+                            self.trace_lifecycle[current_trace_id][-1]["log_msg"] = log_msg
             except Exception as e:
                 print(f"[WARN] Error evaluating condition at row {row_idx}: {e}")
 
@@ -283,7 +227,6 @@ class FsdbAnalyzer:
         - "all": Capture ALL matches in time window (default)
         - "unique_per_var": One match per unique pattern variable combination
         """
-        templates = task.capture
         depends = task.deps
         dep_id = depends[0] if depends else None
         match_mode = task.match_mode  # "first", "all", "unique_per_var"
@@ -310,41 +253,13 @@ class FsdbAnalyzer:
         if cond is None:
             raise RuntimeError(f"[ERROR] Condition not built for task '{task.id}'")
 
-        # Collect all signals needed (from condition + capture templates)
-        raw_signal_patterns = set()
-
-        # Add condition signals (already normalized with {*} wildcards)
-        raw_signal_patterns.update(cond.signals)
-
-        # Expand capture templates with {*} wildcards
-        for tmpl in templates:
-            if "{" in tmpl:
-                wildcard = re.sub(r'\{[^}]+\}', '{*}', tmpl)
-                raw_signal_patterns.add(wildcard)
-            else:
-                raw_signal_patterns.add(tmpl)
-
-        # Expand {*} patterns to actual signal names
-        all_signal_names = self.fsdb_builder.expand_raw_signals(list(raw_signal_patterns))
-
-        # Load all signals
-        # Note: Cache uses normalized names (without bit ranges)
-        signal_data = {}
-        for sig in all_signal_names:
-            # Normalize signal name by removing bit range
-            normalized_sig = normalize_signal_name(sig)
-            try:
-                signal_data[normalized_sig] = self.fsdb_builder.get_signal(normalized_sig)
-            except RuntimeError:
-                print(f"[WARN] Signal {normalized_sig} not found in cache, skipping")
-
-        if not signal_data:
+        if not cond.signal_map:
             print("[WARN] No signals loaded for condition evaluation")
             return []
 
-        # Get timeout from config and timestamps from FSDB
+        # Get timeout from config and timestamps from yaml_builder
         timeout = self.timeout
-        timestamps = self.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.timestamps
 
         if not timestamps:
             print("[WARN] No timestamps available from FSDB")
@@ -396,19 +311,14 @@ class FsdbAnalyzer:
                     break
 
                 try:
-                    # Prepare signal values for this row
-                    signal_values = {}
-                    for sig, vals in signal_data.items():
-                        signal_values[sig] = vals[row_idx] if row_idx < len(vals) else '0'
-
                     runtime_data = {
-                        "signal_values": signal_values,
+                        "time": row_idx,
                         "upstream_row": upstream_row,
                         "upstream_data": upstream_data,
                         "vars": {},
                     }
 
-                    condition_result = self.cond_builder.exec(cond, runtime_data)
+                    condition_result = cond.exec(runtime_data)
                     if condition_result:
                         # Check for multiple matched variables (pattern condition with multiple valid values)
                         all_matched = runtime_data.get("_all_matched_vars", {})
@@ -433,7 +343,7 @@ class FsdbAnalyzer:
                                 # Original behavior: capture first match, break
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -447,7 +357,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (time={current_time})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -465,7 +375,7 @@ class FsdbAnalyzer:
 
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -479,7 +389,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -491,7 +401,7 @@ class FsdbAnalyzer:
                                 # Capture ALL matches in time window
                                 row_data = self._build_row_data(
                                     row_idx, upstream_trace_id, fork_id, upstream_fork_path,
-                                    matched_vars, templates, signal_data, task, upstream_row
+                                    matched_vars, task, upstream_row
                                 )
                                 matched_rows.append(row_data)
 
@@ -505,7 +415,7 @@ class FsdbAnalyzer:
                                     print(f"    Fork {fork_id}: match at row {row_idx} (vars={matched_vars})")
 
                                 if log_format:
-                                    signals = self._expand_templates(templates, matched_vars, task.scope or "")
+                                    signals = [sig.resolve(matched_vars) for sig in task.capture]
                                     log_msg = self.yaml_builder.format_log(log_format, row_data, signals, row_idx)
                                     # Store log message in trace event
                                     if upstream_trace_id in self.trace_lifecycle:
@@ -534,8 +444,6 @@ class FsdbAnalyzer:
         fork_id: int,
         upstream_fork_path: List[int],
         vars: Dict[str, str],
-        templates: List[str],
-        signal_data: Dict[str, List[str]],
         task: Task,
         upstream_row: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -547,8 +455,6 @@ class FsdbAnalyzer:
             fork_id: Fork index within this trace
             upstream_fork_path: Fork path from upstream row
             vars: Matched pattern variables
-            templates: Capture signal templates
-            signal_data: Signal cache data
             task: Task configuration
             upstream_row: Upstream row data (for dependency chain propagation)
 
@@ -556,7 +462,7 @@ class FsdbAnalyzer:
             Row data dictionary with trace info and captured values
         """
         # Expand capture templates with matched variables
-        signals = self._expand_templates(templates, vars, task.scope or "")
+        signals = [sig.resolve(vars) for sig in task.capture]
 
         row_data: Dict[str, Any] = {
             "time": row_idx,
@@ -571,11 +477,11 @@ class FsdbAnalyzer:
         # Capture current task's signals
         for sig in signals:
             # Normalize signal name to match cache keys
-            normalized_sig = normalize_signal_name(sig)
-            if normalized_sig in signal_data:
-                vals = signal_data[normalized_sig]
+            normalized_sig = Signal.normalize(sig)
+            if normalized_sig in task.signal_map:
+                signal_obj = task.signal_map[normalized_sig]
                 # Use original signal name (with scope) as key in capd
-                row_data["capd"][sig] = vals[row_idx] if row_idx < len(vals) else "0"
+                row_data["capd"][sig] = signal_obj.get_value(row_idx)
 
         # Build dependency chain: inherit from upstream + add current task
         if upstream_row:
@@ -811,7 +717,7 @@ class FsdbAnalyzer:
         # Store to memory
         self.runtime_data[task.id] = {
             "rows": matched_rows,
-            "capd": task.capture,  # All captured signals are available for reference
+            "capd": [sig.get_template() for sig in task.capture],  # All captured signal templates available for reference
         }
 
         print(f"Matched {len(matched_rows)} rows")
@@ -822,29 +728,28 @@ class FsdbAnalyzer:
         """Compute all global flush boundary time points"""
         print("[INFO] Computing global flush boundaries...")
 
-        timestamps = self.fsdb_builder.timestamps
+        timestamps = self.yaml_builder.timestamps
+
+        if not self.gflush_condition.signal_map:
+            print("[WARN] No signals loaded for globalFlush condition")
+            return
 
         for row_idx in range(len(timestamps)):
-            # Get signal values for this time point
-            signal_values = {}
-            for signal in self.fsdb_builder.signal_cache:
-                norm_signal = normalize_signal_name(signal)
-                values = self.fsdb_builder.signal_cache[signal]
-                signal_values[norm_signal] = values[row_idx] if row_idx < len(values) else "0"
-
-            runtime_data = {"signal_values": signal_values}
+            runtime_data = {
+                "time": row_idx,
+            }
 
             # Check if flush condition is satisfied
-            if self.cond_builder.exec(self.gflush_condition, runtime_data):
+            if self.gflush_condition.exec(runtime_data):
                 flush_time = timestamps[row_idx]
                 self.flush_boundaries.append(flush_time)
 
                 if self.verbose:
                     # Output which signals triggered flush
                     flush_signals = [
-                        f"{sig}={val}"
-                        for sig, val in signal_values.items()
-                        if val not in ("0", "*0")
+                        f"{sig_name}={sig_obj.get_value(row_idx)}"
+                        for sig_name, sig_obj in self.gflush_condition.signal_map.items()
+                        if sig_obj.get_value(row_idx) not in ("0", "*0")
                     ]
                     print(f"  Flush @ T={flush_time}: {', '.join(flush_signals[:5])}")
 
@@ -866,6 +771,11 @@ class FsdbAnalyzer:
     def run(self) -> None:
         """Execute all configured analysis tasks"""
 
+        # Resolve config (includes Task creation, condition building, SOI collection and signal dump)
+        self.config, self.gflush_condition = self.yaml_builder.resolve_config(
+            dump_signals=not self.deps_only
+        )
+
         # Build execution order based on dependencies (always needed for graph export)
         tasks : List[Task] = self.config.get("tasks", [])
         task_order = self.yaml_builder.build_exec_order()
@@ -874,39 +784,18 @@ class FsdbAnalyzer:
         if self.deps_only:
             print("[INFO] Dependency graph generated. Exiting deps-only mode without FSDB analysis.")
             return
-        if not self.fsdb_builder:
-            raise RuntimeError("[ERROR] FsdbBuilder not initialized in deps-only mode")
 
-        # Collect all signals-of-interest from all tasks using YamlBuilder
-        soi = self.yaml_builder.collect_raw_signals(self.global_scope)
-        self.fsdb_builder.dump_signals(soi)
-
-        # Build all conditions after signals are dumped, TODO
-        for task in tasks:
-            if task.condition is None:
-                task.condition = self.cond_builder.build(task, self.fsdb_builder)
-
-        # Build globalFlush condition after signals are dumped
-        if "globalFlush" in self.config:
-            flush_config = self.config["globalFlush"]
-
-            # Build condition directly from raw expression
-            self.gflush_condition = self.cond_builder.build_raw(
-                raw_condition=flush_config["condition"],
-                scope=self.global_scope,
-                fsdb_builder=self.fsdb_builder
-            )
+        if self.gflush_condition:
             print("[INFO] Global flush condition compiled")
-
             # Compute flush boundaries
             self._compute_flush_boundaries()
 
         print(f"\n{'=' * 70}")
         print(f"[INFO] FSDB Analyzer - Collected {len(tasks)} task(s)")
         print(f"{'=' * 70}")
-        print(f"[INFO] FSDB file: {self.fsdb_file}")
+        print(f"[INFO] FSDB file: {self.yaml_builder.fsdb_file}")
         print(f"[INFO] Clock signal: {self.clock_signal}")
-        print(f"[INFO] Output directory: {self.output_dir}")
+        print(f"[INFO] Output directory: {self.yaml_builder.output_dir}")
         print(f"[INFO] Verbose mode: {'yes' if self.verbose else 'no'}")
         print(f"{'=' * 70}\n")
 
@@ -937,7 +826,7 @@ class FsdbAnalyzer:
         print()
 
         # Export trace lifecycle to file (no console output)
-        trace_report_file = self.output_dir / "trace_lifecycle.txt"
+        trace_report_file = self.yaml_builder.output_dir / "trace_lifecycle.txt"
         self._export_trace_lifecycle(trace_report_file)
 
         # Print duplicate match summary to console
@@ -950,45 +839,3 @@ class FsdbAnalyzer:
             print(f"See {trace_report_file} for details.")
             print(f"{'=' * 70}\n")
 
-
-def main() -> None:
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description="Advanced FSDB Signal Analyzer with Complex Conditions",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run with advanced configuration
-  %(prog)s -c ifu_analysis_advanced.yaml
-
-  # Debug mode: limit to first trigger match
-  %(prog)s -c ifu_analysis_advanced.yaml --debug-num 1
-        """,
-    )
-
-    parser.add_argument(
-        "-c", "--config", required=True,
-        help="YAML configuration file path"
-    )
-
-    parser.add_argument(
-        "--deps-only",
-        action="store_true",
-        help="Only generate dependency graph and exit (skip FSDB analysis)",
-    )
-
-    parser.add_argument(
-        "--debug-num",
-        type=int,
-        default=0,
-        help="Limit number of trigger matches for debugging (0 = unlimited)",
-    )
-
-    args = parser.parse_args()
-
-    analyzer = FsdbAnalyzer(args.config, deps_only=args.deps_only, debug_num=args.debug_num)
-    analyzer.run()
-
-
-if __name__ == "__main__":
-    main()

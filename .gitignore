@@ -10,6 +10,5 @@ out.*
 *.bak
 
 *reports
-*.yaml
 
 RTL_CODE
