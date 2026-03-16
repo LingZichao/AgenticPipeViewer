@@ -1,0 +1,97 @@
+{
+  "traces": [
+    {
+      "trace_id": 0,
+      "events": [
+        {
+          "task_id": "biu_read",
+          "task_name": "BIU Read",
+          "time": 3,
+          "fork_path": [],
+          "captured_signals": {
+            "biu_ifu_rd_data": "0xDEAD_BEEF",
+            "biu_ifu_rd_vld": "1"
+          },
+          "vars": {},
+          "log_msg": "Captured read data from BIU"
+        },
+        {
+          "task_id": "ifu_decode",
+          "task_name": "IFU Decode",
+          "time": 5,
+          "fork_path": [0],
+          "captured_signals": {
+            "ifu_idu_inst_data": "0xDEAD_BEEF",
+            "ifu_idu_inst_vld": "1"
+          },
+          "vars": {
+            "idx": "0"
+          },
+          "log_msg": "Instruction decoded successfully"
+        },
+        {
+          "task_id": "idu_dispatch",
+          "task_name": "IDU Dispatch",
+          "time": 7,
+          "fork_path": [0],
+          "captured_signals": {
+            "idu_rtu_inst_data": "0xDEAD_BEEF",
+            "idu_rtu_inst_vld": "1"
+          },
+          "vars": {},
+          "log_msg": "Instruction dispatched to execution"
+        }
+      ]
+    },
+    {
+      "trace_id": 1,
+      "events": [
+        {
+          "task_id": "biu_read",
+          "task_name": "BIU Read",
+          "time": 4,
+          "fork_path": [],
+          "captured_signals": {
+            "biu_ifu_rd_data": "0x1234_5678",
+            "biu_ifu_rd_vld": "1"
+          },
+          "vars": {},
+          "log_msg": "Captured second read data"
+        },
+        {
+          "task_id": "ifu_decode",
+          "task_name": "IFU Decode",
+          "time": 6,
+          "fork_path": [0],
+          "captured_signals": {
+            "ifu_idu_inst_data": "0x1234_5678",
+            "ifu_idu_inst_vld": "1"
+          },
+          "vars": {
+            "idx": "1"
+          },
+          "log_msg": "Second instruction decoded"
+        }
+      ]
+    },
+    {
+      "trace_id": 2,
+      "events": [
+        {
+          "task_id": "biu_read",
+          "task_name": "BIU Read",
+          "time": 8,
+          "fork_path": [],
+          "captured_signals": {
+            "biu_ifu_rd_data": "0xABCD_EF01",
+            "biu_ifu_rd_vld": "1"
+          },
+          "vars": {},
+          "log_msg": "Third read operation"
+        }
+      ]
+    }
+  ],
+  "stages": ["biu_read", "ifu_decode", "idu_dispatch"],
+  "lanes": ["main", "stall"]
+}

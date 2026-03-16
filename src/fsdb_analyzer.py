@@ -592,6 +592,71 @@ class FsdbAnalyzer:
         except Exception as e:
             print(f"[WARN] Failed to export trace lifecycle: {e}")
 
+    def _export_json(self, output_file: Path) -> None:
+        """Export pipeline data in JSON format for web visualization (Konata-like)
+
+        Args:
+            output_file: Path to output JSON file
+        """
+        import json
+
+        if not self.trace_lifecycle:
+            return
+
+        try:
+            # Build JSON structure similar to Konata's data model
+            json_data = {
+                "traces": [],
+                "stages": [],  # Task IDs as stages
+                "lanes": ["main", "stall"]  # Basic lanes, can be extended
+            }
+
+            # Collect all unique task IDs for stages
+            all_tasks = set()
+            for trace_events in self.trace_lifecycle.values():
+                for event in trace_events:
+                    all_tasks.add(event["task_id"])
+            json_data["stages"] = sorted(list(all_tasks))
+
+            # Build traces
+            for trace_id, events in self.trace_lifecycle.items():
+                if not events:
+                    continue
+
+                trace_data = {
+                    "trace_id": trace_id,
+                    "events": []
+                }
+
+                for event in events:
+                    event_data = {
+                        "task_id": event["task_id"],
+                        "task_name": event["task_name"],
+                        "time": event["time"],
+                        "fork_path": event["fork_path"],
+                        "captured_signals": event.get("capd", {})
+                    }
+
+                    # Add variables if present
+                    if event.get("vars"):
+                        event_data["vars"] = event["vars"]
+
+                    # Add log message if present
+                    if event.get("log_msg"):
+                        event_data["log_msg"] = event["log_msg"]
+
+                    trace_data["events"].append(event_data)
+
+                json_data["traces"].append(trace_data)
+
+            # Write JSON file
+            with open(output_file, "w") as f:
+                json.dump(json_data, f, indent=2)
+
+            print(f"[INFO] JSON pipeline data exported to: {output_file}")
+        except Exception as e:
+            print(f"[WARN] Failed to export JSON: {e}")
+
     def _build_linear_paths(self, events: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         """Build linear paths from trace events by expanding forks
 
@@ -828,6 +893,10 @@ class FsdbAnalyzer:
         # Export trace lifecycle to file (no console output)
         trace_report_file = self.yaml_builder.output_dir / "trace_lifecycle.txt"
         self._export_trace_lifecycle(trace_report_file)
+
+        # Export JSON for web visualization (similar to Konata format)
+        json_report_file = self.yaml_builder.output_dir / "pipeline_data.json"
+        self._export_json(json_report_file)
 
         # Print duplicate match summary to console
         duplicate_count = sum(1 for matches in self.matched_rows_tracker.values() if len(matches) > 1)
