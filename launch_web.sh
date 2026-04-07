@@ -34,7 +34,7 @@ while lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1; do
 done
 
 echo "Starting HTTP server on port $PORT..."
-echo "Web interface will be available at: http://localhost:$PORT/pipeline_viewer.html"
+echo "Web interface will be available at: http://localhost:$PORT/pipeline_viewer.html?v=20260407_3"
 echo ""
 echo "Press Ctrl+C to stop the server"
 echo ""
@@ -54,7 +54,7 @@ open_browser() {
 }
 
 # Open browser after a short delay
-(sleep 2 && open_browser "http://localhost:$PORT/pipeline_viewer.html") &
+(sleep 2 && open_browser "http://localhost:$PORT/pipeline_viewer.html?v=20260407_3") &
 
 # Start the HTTP server
 python3 -m http.server $PORT

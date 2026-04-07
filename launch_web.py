@@ -47,7 +47,7 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
 
-    url = f"http://localhost:{port}/pipeline_viewer.html"
+    url = f"http://localhost:{port}/pipeline_viewer.html?v=20260407_3"
 
     print(f"Starting HTTP server on port {port}...")
     print(f"Web interface will be available at: {url}")

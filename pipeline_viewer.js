@@ -9,6 +9,9 @@ class PipelineViewer {
         this.filteredTraces = [];
         this.selectedTrace = null;
         this.selectedEvent = null;
+        this.activeStageFilter = '';
+        this.eventHitRegions = [];
+        this.isDragging = false;
 
         // View parameters
         this.zoomLevel = 0;
@@ -66,6 +69,8 @@ class PipelineViewer {
         this.canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseup', () => this.handleMouseUp());
+        this.canvas.addEventListener('mouseleave', () => this.handleMouseUp());
+        this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
         this.canvas.addEventListener('wheel', (e) => this.handleWheel(e));
 
         // Buttons
@@ -130,6 +135,8 @@ class PipelineViewer {
     filterTraces(stageFilter) {
         if (!this.data) return;
 
+        this.activeStageFilter = stageFilter || '';
+
         if (!stageFilter) {
             this.filteredTraces = this.data.traces;
         } else {
@@ -147,15 +154,16 @@ class PipelineViewer {
         traceList.innerHTML = '';
 
         this.filteredTraces.forEach(trace => {
+            const visibleEvents = this.getVisibleEvents(trace);
             const traceItem = document.createElement('div');
             traceItem.className = 'trace-item';
-            traceItem.textContent = `Trace ${trace.trace_id} (${trace.events.length} events)`;
-            traceItem.addEventListener('click', () => this.selectTrace(trace));
+            traceItem.textContent = `Trace ${trace.trace_id} (${visibleEvents.length} events)`;
+            traceItem.addEventListener('click', () => this.selectTrace(trace, traceItem));
             traceList.appendChild(traceItem);
         });
     }
 
-    selectTrace(trace) {
+    selectTrace(trace, traceItem) {
         this.selectedTrace = trace;
         this.selectedEvent = null;
 
@@ -163,34 +171,58 @@ class PipelineViewer {
         document.querySelectorAll('.trace-item').forEach(item => {
             item.classList.remove('selected');
         });
-        event.target.classList.add('selected');
+        if (traceItem) {
+            traceItem.classList.add('selected');
+        }
 
         this.showEventDetails(null);
         this.render();
     }
 
-    showEventDetails(event) {
+    getVisibleEvents(trace) {
+        if (!trace || !Array.isArray(trace.events)) {
+            return [];
+        }
+
+        if (!this.activeStageFilter) {
+            return trace.events;
+        }
+
+        return trace.events.filter(event => event.task_id === this.activeStageFilter);
+    }
+
+    showEventDetails(eventOrEvents) {
         const details = document.getElementById('event-details');
         const content = document.getElementById('event-content');
+        const events = Array.isArray(eventOrEvents)
+            ? eventOrEvents
+            : (eventOrEvents ? [eventOrEvents] : []);
 
-        if (!event) {
+        if (!events.length) {
             details.style.display = 'none';
             return;
         }
 
+        const eventRows = events.map((event, index) => `
+            <div style="padding: 6px 0; ${index > 0 ? 'border-top: 1px solid #ddd;' : ''}">
+                <div><strong>Task:</strong> ${event.task_name} (${event.task_id})</div>
+                <div><strong>Time:</strong> ${event.time}</div>
+                <div><strong>Fork Path:</strong> [${(event.fork_path || []).join(', ')}]</div>
+                ${event.vars ? `<div><strong>Variables:</strong> ${JSON.stringify(event.vars)}</div>` : ''}
+                ${event.log_msg ? `<div><strong>Log:</strong> ${event.log_msg}</div>` : ''}
+                <div><strong>Captured Signals:</strong></div>
+                <div class="signal-list">
+                    ${Object.entries(event.captured_signals || {}).map(([sig, val]) =>
+                        `<div class="signal-item">${sig} = ${val}</div>`
+                    ).join('')}
+                </div>
+            </div>
+        `).join('');
+
         details.style.display = 'block';
         content.innerHTML = `
-            <div><strong>Task:</strong> ${event.task_name} (${event.task_id})</div>
-            <div><strong>Time:</strong> ${event.time}</div>
-            <div><strong>Fork Path:</strong> [${event.fork_path.join(', ')}]</div>
-            ${event.vars ? `<div><strong>Variables:</strong> ${JSON.stringify(event.vars)}</div>` : ''}
-            ${event.log_msg ? `<div><strong>Log:</strong> ${event.log_msg}</div>` : ''}
-            <div><strong>Captured Signals:</strong></div>
-            <div class="signal-list">
-                ${Object.entries(event.captured_signals).map(([sig, val]) =>
-                    `<div class="signal-item">${sig} = ${val}</div>`
-                ).join('')}
-            </div>
+            <div><strong>Stacked Events:</strong> ${events.length}</div>
+            ${eventRows}
         `;
     }
 
@@ -260,6 +292,17 @@ class PipelineViewer {
         this.canvas.style.cursor = 'grab';
     }
 
+    handleCanvasClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const region = this.getEventAtPosition(x, y);
+
+        if (!region) return;
+
+        this.showEventDetails(region.events);
+    }
+
     handleWheel(e) {
         e.preventDefault();
         const zoomDelta = e.deltaY > 0 ? -0.1 : 0.1;
@@ -273,16 +316,29 @@ class PipelineViewer {
     }
 
     updateTooltip(x, y) {
-        const event = this.getEventAtPosition(x, y);
-        if (event) {
+        const region = this.getEventAtPosition(x, y);
+        if (region) {
+            const events = region.events;
+            const infoItemsPerEvent = 4; // task, time, trace, signals
+
+            const summary = events.map((event, idx) => {
+                const signalCount = Object.keys(event.captured_signals || {}).length;
+                return `
+                    <div style="margin-top: 6px; ${idx > 0 ? 'padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.25);' : ''}">
+                        <div><strong>${event.task_name}</strong> (${event.task_id})</div>
+                        <div>Time: ${event.time}</div>
+                        <div>Trace: ${event.trace_id}</div>
+                        <div>Signals: ${signalCount}</div>
+                    </div>
+                `;
+            }).join('');
+
             this.tooltip.style.left = (x + 10) + 'px';
             this.tooltip.style.top = (y - 10) + 'px';
             this.tooltip.innerHTML = `
-                <div><strong>${event.task_name}</strong></div>
-                <div>Time: ${event.time}</div>
-                <div>Trace: ${event.trace_id}</div>
-                ${Object.keys(event.captured_signals).length > 0 ?
-                    '<div>Signals: ' + Object.keys(event.captured_signals).length + '</div>' : ''}
+                <div><strong>Trace ${region.trace_id} @ Time ${region.time}</strong></div>
+                <div>Stacked: ${events.length} * ${infoItemsPerEvent}</div>
+                ${summary}
             `;
             this.tooltip.style.display = 'block';
         } else {
@@ -291,22 +347,27 @@ class PipelineViewer {
     }
 
     getEventAtPosition(x, y) {
-        if (!this.data) return null;
+        if (!this.eventHitRegions.length) return null;
 
-        const worldX = (x - this.offsetX) / this.scale;
-        const worldY = (y - this.offsetY) / this.scale;
+        for (let i = this.eventHitRegions.length - 1; i >= 0; i--) {
+            const region = this.eventHitRegions[i];
+            if (
+                x >= region.x &&
+                x <= region.x + region.width &&
+                y >= region.y &&
+                y <= region.y + region.height
+            ) {
+                return region;
+            }
+        }
 
-        const time = Math.floor(worldX / this.EVENT_WIDTH) + this.minTime;
-        const traceId = Math.floor(worldY / this.TRACE_HEIGHT);
-
-        const trace = this.data.traces.find(t => t.trace_id === traceId);
-        if (!trace) return null;
-
-        return trace.events.find(e => e.time === time) || null;
+        return null;
     }
 
     render() {
         if (!this.data) return;
+
+        this.eventHitRegions = [];
 
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
@@ -354,27 +415,62 @@ class PipelineViewer {
 
     drawTrace(trace) {
         const y = this.offsetY + trace.trace_id * this.TRACE_HEIGHT * this.scale;
+        const visibleEvents = this.getVisibleEvents(trace);
+        const eventsByTime = new Map();
 
-        trace.events.forEach(event => {
-            const x = this.offsetX + (event.time - this.minTime) * this.EVENT_WIDTH * this.scale;
+        visibleEvents.forEach(event => {
+            const key = event.time;
+            if (!eventsByTime.has(key)) {
+                eventsByTime.set(key, []);
+            }
+            eventsByTime.get(key).push(event);
+        });
+
+        eventsByTime.forEach((eventsAtTime, time) => {
+            const x = this.offsetX + (time - this.minTime) * this.EVENT_WIDTH * this.scale;
             const width = this.EVENT_WIDTH * this.scale;
-            const height = this.TRACE_HEIGHT * this.scale * 0.8;
+            const eventY = y + this.TRACE_HEIGHT * this.scale * 0.1;
+            const eventHeight = this.TRACE_HEIGHT * this.scale * 0.8;
+            const laneCount = eventsAtTime.length;
+            const laneGap = laneCount > 1 ? Math.max(0.5, Math.min(2, this.scale * 0.2)) : 0;
+            const laneHeight = laneCount > 1
+                ? Math.max(1, (eventHeight - laneGap * (laneCount - 1)) / laneCount)
+                : eventHeight;
 
-            // Draw event box
-            this.ctx.fillStyle = this.stageColors[event.task_id] || '#95a5a6';
-            this.ctx.fillRect(x, y + height * 0.1, width, height);
+            // Draw a single stacked block per time slot, split by event count.
+            eventsAtTime.forEach((event, laneIndex) => {
+                const laneY = eventY + laneIndex * (laneHeight + laneGap);
+                this.ctx.fillStyle = this.stageColors[event.task_id] || '#95a5a6';
+                this.ctx.fillRect(x, laneY, width, laneHeight);
+            });
 
-            // Draw border
+            // Draw one outer border so this time slot is visually one stacked block.
             this.ctx.strokeStyle = '#333';
             this.ctx.lineWidth = 1;
-            this.ctx.strokeRect(x, y + height * 0.1, width, height);
+            this.ctx.strokeRect(x, eventY, width, eventHeight);
+
+            if (laneCount > 1 && width > 12 && eventHeight > 10) {
+                this.ctx.fillStyle = '#111';
+                this.ctx.font = '10px Arial';
+                this.ctx.fillText(`x${laneCount}`, x + 2, eventY + 10);
+            }
 
             // Highlight selected trace
             if (this.selectedTrace && this.selectedTrace.trace_id === trace.trace_id) {
                 this.ctx.strokeStyle = '#ff0000';
                 this.ctx.lineWidth = 2;
-                this.ctx.strokeRect(x - 1, y + height * 0.1 - 1, width + 2, height + 2);
+                this.ctx.strokeRect(x - 1, eventY - 1, width + 2, eventHeight + 2);
             }
+
+            this.eventHitRegions.push({
+                x,
+                y: eventY,
+                width,
+                height: eventHeight,
+                time,
+                trace_id: trace.trace_id,
+                events: eventsAtTime.map(event => ({ ...event, trace_id: trace.trace_id }))
+            });
         });
     }
 
