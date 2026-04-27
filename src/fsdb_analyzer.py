@@ -113,11 +113,20 @@ class FsdbAnalyzer:
         if trace_id not in self.trace_lifecycle:
             self.trace_lifecycle[trace_id] = []
 
+        row_idx = row_data.get("time", -1)
+        fsdb_time = row_idx
+        try:
+            if row_idx >= 0:
+                fsdb_time = self.yaml_builder.timestamps[row_idx]
+        except (AttributeError, IndexError, RuntimeError):
+            fsdb_time = row_idx
+
         event = {
             "type": event_type,
             "task_id": task.id,
             "task_name": task.name or task.id,
-            "time": row_data.get("time", -1),
+            "time": row_idx,
+            "fsdb_time": fsdb_time,
             "fork_path": row_data.get("fork_path", []),
             "fork_id": row_data.get("fork_id", -1),
             "vars": row_data.get("vars", {}),
@@ -529,7 +538,8 @@ class FsdbAnalyzer:
 
                         for step_idx, event in enumerate(path):
                             task_name = event["task_name"]
-                            time = event["time"]
+                            row_idx = event["time"]
+                            fsdb_time = event.get("fsdb_time", row_idx)
                             log_msg = event.get("log_msg", "")
 
                             # Use simple arrow notation for linear sequence
@@ -540,7 +550,7 @@ class FsdbAnalyzer:
                             else:
                                 symbol = "→"  # Middle
 
-                            f.write(f"  {symbol} [{task_name}] time={time}")
+                            f.write(f"  {symbol} [{task_name}] row={row_idx} fsdb_time={fsdb_time}")
 
                             # Add variables if present
                             if event.get("vars"):
@@ -582,7 +592,7 @@ class FsdbAnalyzer:
                     for task_id in sorted(task_duplicates.keys()):
                         f.write(f"\nTask '{task_duplicates[task_id][0][1][0]['task_name']}':\n")
                         for time, matches in sorted(task_duplicates[task_id]):
-                            f.write(f"  Time={time}: {len(matches)} matches\n")
+                            f.write(f"  Row={time}: {len(matches)} matches\n")
                             for match in matches:
                                 f.write(f"    - trace={match['trace_id']}, path={match['fork_path']}\n")
                 else:
@@ -673,7 +683,8 @@ class FsdbAnalyzer:
 
                 for step_idx, event in enumerate(path):
                     task_name = event["task_name"]
-                    time = event["time"]
+                    row_idx = event["time"]
+                    fsdb_time = event.get("fsdb_time", row_idx)
                     log_msg = event.get("log_msg", "")
 
                     # Use simple arrow notation for linear sequence
@@ -684,7 +695,7 @@ class FsdbAnalyzer:
                     else:
                         symbol = "→"  # Middle
 
-                    print(f"  {symbol} [{task_name}] time={time}", end="")
+                    print(f"  {symbol} [{task_name}] row={row_idx} fsdb_time={fsdb_time}", end="")
 
                     # Add variables if present
                     if event.get("vars"):
@@ -838,4 +849,3 @@ class FsdbAnalyzer:
             print(f"Total rows with duplicate matches within same task: {duplicate_count}")
             print(f"See {trace_report_file} for details.")
             print(f"{'=' * 70}\n")
-
