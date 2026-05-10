@@ -12,7 +12,6 @@ class Signal:
     name: str  # Normalized name without bit range
     msb: int
     lsb: int
-    vidcode: int
     values: List[str]
 
     def __init__(self, raw_name: str, scope: str = ""):
@@ -27,7 +26,6 @@ class Signal:
         self.name = self.normalize(raw_name)
         self.msb = 0
         self.lsb = 0
-        self.vidcode = -1
         self.values = []
         
         # Parse MSB/LSB from raw_name

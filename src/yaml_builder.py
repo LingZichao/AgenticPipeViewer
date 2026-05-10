@@ -395,7 +395,6 @@ class YamlBuilder:
                 if normalized in self._fsdb_builder._signals:
                     cached_sig = self._fsdb_builder._signals[normalized]
                     # Populate waveform data into the existing Signal object
-                    sig.vidcode = cached_sig.vidcode
                     sig.values = cached_sig.values
                     sig.msb = cached_sig.msb
                     sig.lsb = cached_sig.lsb

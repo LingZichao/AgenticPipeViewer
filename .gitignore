@@ -9,6 +9,8 @@ out.*
 *.log
 *.bak
 
+npiLog
+
 *reports
 
 RTL_CODE

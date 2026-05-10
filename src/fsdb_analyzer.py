@@ -517,7 +517,7 @@ class FsdbAnalyzer:
             return
 
         try:
-            with open(output_file, "w") as f:
+            with open(output_file, "w", encoding="utf-8") as f:
                 f.write("=" * 70 + "\n")
                 f.write("Trace Lifecycle Report (Linear Paths)\n")
                 f.write("=" * 70 + "\n\n")
